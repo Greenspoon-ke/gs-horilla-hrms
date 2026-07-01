@@ -45,7 +45,7 @@ error_data_template = {
         "Work Type",
         "Shift",
         "Employee Type",
-        "Reporting Manager",
+        "Reporting Manager Badge ID",
         "Company",
         "Location",
         "Date Joining",
@@ -73,11 +73,33 @@ def chunked(iterable, size):
         yield iterable[i : i + size]
 
 
+def is_blank_cell(value):
+    if pd.isna(value) or value is None:
+        return True
+    return str(value).strip().lower() in ("", "nan", "none")
+
+
 def normalize_phone(phone):
+    if is_blank_cell(phone):
+        return ""
     phone = str(phone).strip()
     if phone.startswith("+"):
-        return "+" + re.sub(r"\D", "", phone[1:])
-    return re.sub(r"\D", "", phone)
+        digits = re.sub(r"\D", "", phone[1:])
+        return f"+{digits}" if digits else ""
+    digits = re.sub(r"\D", "", phone)
+    if not digits:
+        return ""
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "254" + digits[1:]
+    elif len(digits) == 9 and digits.startswith("7"):
+        digits = "254" + digits
+    return digits
+
+
+def normalize_gender(value):
+    if is_blank_cell(value):
+        return None
+    return str(value).strip().lower()
 
 
 def import_valid_date(date_value, field_label, errors_dict, error_key):
@@ -111,8 +133,11 @@ def clean_badge_id(value):
     - If the value is a non-numeric string (e.g., "A101"), returns the stripped string.
     - If the value is NaN or None, returns an empty string.
     """
-    if pd.isna(value):
+    if is_blank_cell(value):
         return ""
+
+    if isinstance(value, str):
+        return value.strip()
 
     try:
         float_val = float(value)
@@ -232,7 +257,6 @@ def valid_import_file_headers(data_frame):
         "Work Type",
         "Shift",
         "Employee Type",
-        "Reporting Manager",
         "Company",
         "Location",
         "Date Joining",
@@ -255,7 +279,18 @@ def process_employee_records(data_frame):
     email_regex = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
     phone_regex = re.compile(r"^\+?\d{10,15}$")
     allowed_genders = frozenset(choice[0] for choice in Employee.choice_gender)
-    existing_badge_ids = frozenset(Employee.objects.values_list("badge_id", flat=True))
+    existing_by_badge = {
+        emp.badge_id: emp
+        for emp in Employee.objects.entire()
+        .exclude(badge_id__isnull=True)
+        .exclude(badge_id="")
+        .only("id", "badge_id", "email")
+    }
+    existing_by_email = {
+        emp.email.lower(): emp
+        for emp in Employee.objects.entire().only("id", "badge_id", "email")
+    }
+    existing_badge_ids = frozenset(existing_by_badge.keys())
     existing_usernames = frozenset(User.objects.values_list("username", flat=True))
     existing_name_emails = frozenset(
         (fname, lname, email)
@@ -264,13 +299,15 @@ def process_employee_records(data_frame):
         )
     )
     existing_companies = frozenset(Company.objects.values_list("company", flat=True))
-    success_list, error_list = [], []
+    create_list, update_list, error_list = [], [], []
     employee_dicts = data_frame.to_dict("records")
 
     created_count = 0
+    updated_count = 0
     seen_badge_ids = set(existing_badge_ids)
     seen_usernames = set(existing_usernames)
     seen_name_emails = set(existing_name_emails)
+    seen_import_badges = set()
 
     today = date.today()
 
@@ -284,7 +321,7 @@ def process_employee_records(data_frame):
         badge_id = clean_badge_id(emp.get("Badge ID"))
         first_name = convert_nan("First Name", emp)
         last_name = convert_nan("Last Name", emp)
-        gender = str(emp.get("Gender") or "").strip().lower()
+        gender = normalize_gender(emp.get("Gender"))
         company = convert_nan("Company", emp)
         basic_salary = convert_nan("Basic Salary", emp)
         salary_hour = convert_nan("Salary Hour", emp)
@@ -321,35 +358,63 @@ def process_employee_records(data_frame):
             save = False
 
         # Phone validation
-        if not phone_regex.match(phone):
+        if phone and not phone_regex.match(phone):
             errors["Phone Error"] = "Invalid phone number format."
             save = False
 
-        # Badge ID validation
-        if badge_id in seen_badge_ids:
-            errors["Badge ID Error"] = "An employee with this badge ID already exists."
-            save = False
-        else:
-            # To resolve Badge ID Type Mismatch (Float vs String)
-            emp["Badge ID"] = badge_id
-            seen_badge_ids.add(badge_id)
+        badge_employee = existing_by_badge.get(badge_id) if badge_id else None
+        email_employee = existing_by_email.get(email)
+        is_update = False
 
-        # Username/email uniqueness
-        if email in seen_usernames:
-            errors["User ID Error"] = "User with this email already exists."
-            save = False
-        else:
-            seen_usernames.add(email)
-
-        # Name+email uniqueness
-        name_email_tuple = (first_name, last_name, email)
-        if name_email_tuple in seen_name_emails:
-            errors["Name and Email Error"] = (
-                "This employee already exists in the system."
+        if badge_employee and email_employee and badge_employee.id != email_employee.id:
+            errors["Match Error"] = (
+                "Badge ID and email belong to different employees."
             )
             save = False
+        elif badge_employee:
+            is_update = True
+            emp["Badge ID"] = badge_id
+        elif email_employee:
+            if not email_employee.badge_id:
+                errors["Badge ID Error"] = "Employee has no badge ID in the system."
+                save = False
+            else:
+                is_update = True
+                emp["Badge ID"] = email_employee.badge_id
+
+        if is_update:
+            if emp["Badge ID"] in seen_import_badges:
+                errors["Badge ID Error"] = "Duplicate badge ID in import file."
+                save = False
+            else:
+                seen_import_badges.add(emp["Badge ID"])
         else:
-            seen_name_emails.add(name_email_tuple)
+            # Badge ID validation
+            if badge_id in seen_badge_ids:
+                errors["Badge ID Error"] = (
+                    "An employee with this badge ID already exists."
+                )
+                save = False
+            else:
+                emp["Badge ID"] = badge_id
+                seen_badge_ids.add(badge_id)
+
+            # Username/email uniqueness
+            if email in seen_usernames:
+                errors["User ID Error"] = "User with this email already exists."
+                save = False
+            else:
+                seen_usernames.add(email)
+
+            # Name+email uniqueness
+            name_email_tuple = (first_name, last_name, email)
+            if name_email_tuple in seen_name_emails:
+                errors["Name and Email Error"] = (
+                    "This employee already exists in the system."
+                )
+                save = False
+            else:
+                seen_name_emails.add(name_email_tuple)
 
         # Gender validation
         if gender and gender not in allowed_genders:
@@ -389,13 +454,17 @@ def process_employee_records(data_frame):
             emp["Phone"] = phone
             emp["Date Joining"] = joining_date
             emp["Contract End Date"] = contract_end_date
-            success_list.append(emp)
-            created_count += 1
+            if is_update:
+                update_list.append(emp)
+                updated_count += 1
+            else:
+                create_list.append(emp)
+                created_count += 1
         else:
             emp.update(errors)
             error_list.append(emp)
 
-    return success_list, error_list, created_count
+    return create_list, update_list, error_list, created_count, updated_count
 
 
 def bulk_create_user_import(success_lists):
@@ -423,7 +492,7 @@ def bulk_create_user_import(success_lists):
         User(
             username=row["Email"],
             email=row["Email"],
-            password=str(row["Phone"]).strip(),
+            password=str(row.get("Phone") or "").strip() or row["Email"],
             is_superuser=False,
         )
         for row in success_lists
@@ -459,19 +528,22 @@ def bulk_create_employee_import(success_lists):
         )
     }
 
-    employees_to_create = [
-        Employee(
-            employee_user_id=existing_users[row["Email"]],
-            badge_id=row["Badge ID"],
-            employee_first_name=convert_nan("First Name", row),
-            employee_last_name=convert_nan("Last Name", row),
-            email=row["Email"],
-            phone=row["Phone"],
-            gender=row.get("Gender", "").lower(),
-        )
-        for row in success_lists
-        if row["Email"] in existing_users
-    ]
+    employees_to_create = []
+    for row in success_lists:
+        if row["Email"] not in existing_users:
+            continue
+        employee_kwargs = {
+            "employee_user_id": existing_users[row["Email"]],
+            "badge_id": row["Badge ID"],
+            "employee_first_name": convert_nan("First Name", row),
+            "employee_last_name": convert_nan("Last Name", row),
+            "email": row["Email"],
+            "phone": row.get("Phone") or "",
+        }
+        gender = normalize_gender(row.get("Gender"))
+        if gender:
+            employee_kwargs["gender"] = gender
+        employees_to_create.append(Employee(**employee_kwargs))
 
     created_employees = []
     if employees_to_create:
@@ -491,29 +563,13 @@ def set_initial_password(employees):
     logger.info("started to set initial password")
     for employee in employees:
         try:
-            employee.employee_user_id.set_password(str(employee.phone))
+            employee.employee_user_id.set_password(
+                str(employee.phone or employee.email)
+            )
             employee.employee_user_id.save()
         except Exception as e:
             logger.error(f"falied to set initial password for {employee}")
     logger.info("initial password configured")
-
-
-def optimize_reporting_manager_lookup():
-    """
-    Optimizes the lookup of reporting managers from a list of work information.
-
-    This function identifies unique reporting manager names from the provided
-    list of work information, queries all matching `Employee` objects in a
-    single database query, and creates a dictionary for quick lookups based
-    on the full name of the reporting managers.
-    """
-    employees = Employee.objects.entire()
-
-    employee_dict = {
-        f"{employee.employee_first_name} {employee.employee_last_name}": employee
-        for employee in employees
-    }
-    return employee_dict
 
 
 def bulk_create_department_import(success_lists):
@@ -820,7 +876,14 @@ def bulk_create_work_info_import(success_lists):
         comp.company: comp
         for comp in Company.objects.filter(company__in=companies).only("company")
     }
-    reporting_manager_dict = optimize_reporting_manager_lookup()
+    managers_by_badge = {
+        emp.badge_id: emp
+        for emp in Employee.objects.entire()
+        .exclude(badge_id__isnull=True)
+        .exclude(badge_id="")
+        .only("id", "badge_id")
+    }
+    hq_company = Company.objects.filter(hq=True).first()
 
     for work_info in success_lists:
         badge_id = work_info["Badge ID"]
@@ -847,13 +910,16 @@ def bulk_create_work_info_import(success_lists):
         work_type_obj = existing_work_types.get(work_info.get("Work Type"))
         employee_type_obj = existing_employee_types.get(work_info.get("Employee Type"))
         shift_obj = existing_shifts.get(work_info.get("Shift"))
-        reporting_manager = work_info.get("Reporting Manager")
-        reporting_manager_obj = None
-        if isinstance(reporting_manager, str) and " " in reporting_manager:
-            if reporting_manager in reporting_manager_dict:
-                reporting_manager_obj = reporting_manager_dict[reporting_manager]
+        manager_badge = clean_badge_id(
+            work_info.get("Reporting Manager Badge ID")
+        )
+        reporting_manager_obj = (
+            managers_by_badge.get(manager_badge) if manager_badge else None
+        )
 
         company_obj = existing_companies.get(work_info.get("Company"))
+        if not company_obj:
+            company_obj = hq_company
         location = work_info.get("Location")
 
         # Parsing dates and salary
