@@ -219,6 +219,37 @@ class EmployeeForm(ModelForm):
 
             raise forms.ValidationError({"email": error_message})
 
+        if self.instance and self.instance.pk and self.instance.employee_user_id:
+            if self.instance.email != email and User.objects.filter(
+                username=email
+            ).exclude(pk=self.instance.employee_user_id_id).exists():
+                raise forms.ValidationError(
+                    {
+                        "email": _(
+                            "This email is already used as a login username by another user."
+                        )
+                    }
+                )
+
+    def save(self, commit=True):
+        old_email = self.instance.email if self.instance.pk else None
+        employee = super().save(commit=commit)
+        if (
+            commit
+            and old_email
+            and employee.email != old_email
+            and employee.employee_user_id
+        ):
+            user = employee.employee_user_id
+            user.username = employee.email
+            user.email = employee.email
+            user.save(update_fields=["username", "email"])
+            if hasattr(employee, "employee_work_info"):
+                work_info = employee.employee_work_info
+                work_info.email = employee.email
+                work_info.save(update_fields=["email"])
+        return employee
+
     def get_next_badge_id(self):
         """
         This method is used to generate badge id
