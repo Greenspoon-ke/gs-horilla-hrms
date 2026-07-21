@@ -64,6 +64,7 @@ error_data_template = {
         "Salary Hour Error",
         "User ID Error",
         "Company Error",
+        "Match Error",
     ]
 }
 
@@ -365,6 +366,7 @@ def process_employee_records(data_frame):
         badge_employee = existing_by_badge.get(badge_id) if badge_id else None
         email_employee = existing_by_email.get(email)
         is_update = False
+        matched_employee = None
 
         if badge_employee and email_employee and badge_employee.id != email_employee.id:
             errors["Match Error"] = (
@@ -373,6 +375,7 @@ def process_employee_records(data_frame):
             save = False
         elif badge_employee:
             is_update = True
+            matched_employee = badge_employee
             emp["Badge ID"] = badge_id
         elif email_employee:
             if not email_employee.badge_id:
@@ -380,6 +383,7 @@ def process_employee_records(data_frame):
                 save = False
             else:
                 is_update = True
+                matched_employee = email_employee
                 emp["Badge ID"] = email_employee.badge_id
 
         if is_update:
@@ -388,6 +392,22 @@ def process_employee_records(data_frame):
                 save = False
             else:
                 seen_import_badges.add(emp["Badge ID"])
+
+            current_email = (matched_employee.email or "").strip().lower()
+            if email and email != current_email:
+                other_employee = existing_by_email.get(email)
+                if other_employee and other_employee.id != matched_employee.id:
+                    errors["Email Error"] = "Email already used by another employee."
+                    save = False
+                elif any(
+                    str(username).lower() == email
+                    for username in seen_usernames
+                    if username
+                ):
+                    errors["User ID Error"] = "User with this email already exists."
+                    save = False
+                else:
+                    seen_usernames.add(email)
         else:
             # Badge ID validation
             if badge_id in seen_badge_ids:
@@ -451,10 +471,12 @@ def process_employee_records(data_frame):
 
         # Final processing
         if save:
+            emp["Email"] = email
             emp["Phone"] = phone
             emp["Date Joining"] = joining_date
             emp["Contract End Date"] = contract_end_date
             if is_update:
+                emp["_employee_id"] = matched_employee.id
                 update_list.append(emp)
                 updated_count += 1
             else:
@@ -553,6 +575,79 @@ def bulk_create_employee_import(success_lists):
             )
 
     return created_employees
+
+
+def bulk_update_employee_import(update_list):
+    """
+    Updates existing Employee and linked User emails (and basic fields) from import rows.
+    Mirrors EmployeeForm.save() identity sync for bulk upserts.
+    """
+    if not update_list:
+        return []
+
+    badge_ids = [row["Badge ID"] for row in update_list]
+    employees_by_badge = {
+        emp.badge_id: emp
+        for emp in Employee.objects.entire()
+        .filter(badge_id__in=badge_ids)
+        .select_related("employee_user_id")
+    }
+
+    employees_to_update = []
+    users_to_update = []
+
+    for row in update_list:
+        employee = employees_by_badge.get(row["Badge ID"])
+        if not employee:
+            continue
+
+        new_email = str(row.get("Email", "")).strip().lower()
+        first_name = convert_nan("First Name", row)
+        last_name = convert_nan("Last Name", row)
+        if first_name:
+            employee.employee_first_name = first_name
+        if last_name is not None:
+            employee.employee_last_name = last_name or ""
+        employee.email = new_email
+        employee.phone = row.get("Phone") or ""
+        gender = normalize_gender(row.get("Gender"))
+        if gender:
+            employee.gender = gender
+        employees_to_update.append(employee)
+
+        user = employee.employee_user_id
+        if user and (
+            (user.username or "").strip().lower() != new_email
+            or (user.email or "").strip().lower() != new_email
+        ):
+            user.username = new_email
+            user.email = new_email
+            users_to_update.append(user)
+
+    if not employees_to_update and not users_to_update:
+        return []
+
+    with transaction.atomic():
+        if employees_to_update:
+            Employee.objects.bulk_update(
+                employees_to_update,
+                [
+                    "employee_first_name",
+                    "employee_last_name",
+                    "email",
+                    "phone",
+                    "gender",
+                ],
+                batch_size=None if is_postgres else 999,
+            )
+        if users_to_update:
+            User.objects.bulk_update(
+                users_to_update,
+                ["username", "email"],
+                batch_size=None if is_postgres else 999,
+            )
+
+    return employees_to_update
 
 
 def set_initial_password(employees):

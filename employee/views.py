@@ -91,6 +91,7 @@ from employee.methods.methods import (
     bulk_create_user_import,
     bulk_create_work_info_import,
     bulk_create_work_types,
+    bulk_update_employee_import,
     error_data_template,
     get_ordered_badge_ids,
     process_employee_records,
@@ -2591,6 +2592,8 @@ def work_info_import(request):
                     if create_list:
                         bulk_create_user_import(create_list)
                         employees = bulk_create_employee_import(create_list)
+                    if update_list:
+                        bulk_update_employee_import(update_list)
                     bulk_create_department_import(import_rows)
                     bulk_create_job_position_import(import_rows)
                     bulk_create_job_role_import(import_rows)
