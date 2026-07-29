@@ -8,6 +8,7 @@ responses in pms app.
 import datetime
 import json
 import logging
+from decimal import Decimal, InvalidOperation
 from itertools import tee
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -2270,6 +2271,8 @@ def feedback_manager_review(request, id):
             manager=employee
         )
     }
+    for answer in employee_answers:
+        answer.existing_manager_rating = existing_ratings.get(answer.id)
 
     context = {
         "feedback": feedback,
@@ -2307,22 +2310,37 @@ def feedback_manager_review_post(request, id):
             employee_id=feedback.employee_id
         )
 
-        # Save manager's ratings for each employee answer
+        ratings = {}
         for answer in employee_answers:
             rating_value = request.POST.get(f"rating_{answer.id}")
+            try:
+                rating = Decimal(rating_value)
+                if not Decimal("1.0") <= rating <= Decimal("5.0"):
+                    raise ValueError
+                if rating != rating.quantize(Decimal("0.1")):
+                    raise ValueError
+            except (InvalidOperation, TypeError, ValueError):
+                messages.error(
+                    request,
+                    _("Each rating must be between 1.0 and 5.0, with one decimal place."),
+                )
+                return redirect("feedback-manager-review", id=feedback.id)
+            ratings[answer.id] = rating
+
+        # Save manager's ratings for each employee answer
+        for answer in employee_answers:
             comment_value = request.POST.get(f"comment_{answer.id}")
 
-            if rating_value or comment_value:
-                ManagerRating.objects.update_or_create(
-                    feedback=feedback,
-                    employee_answer=answer,
-                    manager=manager,
-                    defaults={
-                        "question": answer.question_id,
-                        "rating": int(rating_value) if rating_value else None,
-                        "comment": comment_value or "",
-                    }
-                )
+            ManagerRating.objects.update_or_create(
+                feedback=feedback,
+                employee_answer=answer,
+                manager=manager,
+                defaults={
+                    "question": answer.question_id,
+                    "rating": ratings[answer.id],
+                    "comment": comment_value or "",
+                }
+            )
 
         # Handle manager-only questions (if any)
         question_template = feedback.question_template_id

@@ -66,17 +66,35 @@
             <!-- Manager's Rating -->
             <div class="mt-3 p-2" style="background-color: #e3f2fd; border-radius: 4px;">
               <label class="oh-label fw-bold text-primary">{% trans "Your Rating" %}:</label>
-              <div class="oh-rate mt-2">
-                <input type="radio" id="star5_{{ answer.id }}" name="rating_{{ answer.id }}" value="5" />
-                <label for="star5_{{ answer.id }}" title="5 Stars">5 {% trans "Stars" %}</label>
-                <input type="radio" id="star4_{{ answer.id }}" name="rating_{{ answer.id }}" value="4" />
-                <label for="star4_{{ answer.id }}" title="4 Stars">4 {% trans "Stars" %}</label>
-                <input type="radio" id="star3_{{ answer.id }}" name="rating_{{ answer.id }}" value="3" />
-                <label for="star3_{{ answer.id }}" title="3 Stars">3 {% trans "Stars" %}</label>
-                <input type="radio" id="star2_{{ answer.id }}" name="rating_{{ answer.id }}" value="2" />
-                <label for="star2_{{ answer.id }}" title="2 Stars">2 {% trans "Stars" %}</label>
-                <input type="radio" id="star1_{{ answer.id }}" name="rating_{{ answer.id }}" value="1" />
-                <label for="star1_{{ answer.id }}" title="1 Star">1 {% trans "Star" %}</label>
+              <div class="manager-rating-control mt-2 d-flex align-items-center" style="gap: 12px;">
+                <input
+                  type="number"
+                  class="oh-input manager-rating-input"
+                  name="rating_{{ answer.id }}"
+                  min="1"
+                  max="5"
+                  step="0.1"
+                  inputmode="decimal"
+                  value="{% if answer.existing_manager_rating.rating %}{{ answer.existing_manager_rating.rating }}{% endif %}"
+                  placeholder="1.0 - 5.0"
+                  aria-label="{% trans 'Manager rating from 1.0 to 5.0' %}"
+                  style="max-width: 130px;"
+                  required
+                />
+                <div class="d-flex align-items-center" style="gap: 8px;">
+                  <span
+                    class="manager-rating-stars"
+                    aria-hidden="true"
+                    style="position: relative; display: inline-block; color: #d6d6d6; font-size: 1.5rem; line-height: 1;"
+                  >
+                    <span>★★★★★</span>
+                    <span
+                      class="manager-rating-stars__fill"
+                      style="position: absolute; inset: 0 auto 0 0; width: 0; overflow: hidden; white-space: nowrap; color: #f5b301;"
+                    >★★★★★</span>
+                  </span>
+                  <strong class="manager-rating-value">—/5</strong>
+                </div>
               </div>
 
               <!-- Manager's Comment -->
@@ -87,7 +105,7 @@
                   name="comment_{{ answer.id }}" 
                   rows="2" 
                   placeholder="{% trans 'Add your feedback on this response...' %}"
-                ></textarea>
+                >{% if answer.existing_manager_rating.comment %}{{ answer.existing_manager_rating.comment }}{% endif %}</textarea>
               </div>
             </div>
           </div>
@@ -229,6 +247,22 @@
 
 <script>
 $(document).ready(function() {
+  function updateManagerRatingPreview(input) {
+    var value = Number.parseFloat(input.value);
+    var control = $(input).closest('.manager-rating-control');
+    var isValid = Number.isFinite(value) && value >= 1 && value <= 5;
+    var percentage = isValid ? (value / 5) * 100 : 0;
+
+    control.find('.manager-rating-stars__fill').css('width', percentage + '%');
+    control.find('.manager-rating-value').text(isValid ? value.toFixed(1) + '/5' : '—/5');
+  }
+
+  $('.manager-rating-input').each(function() {
+    updateManagerRatingPreview(this);
+  }).on('input change', function() {
+    updateManagerRatingPreview(this);
+  });
+
   // Fix auto-scroll issue on star rating click
   $('.oh-rate label').on('click', function(e) {
     // Store current scroll position
@@ -248,13 +282,16 @@ $(document).ready(function() {
     
     // Validate manager ratings for employee answers
     {% for answer in employee_answers %}
-    if (!$('input[name="rating_{{ answer.id }}"]:checked').length) {
+    var ratingInput = $('input[name="rating_{{ answer.id }}"]')[0];
+    if (!ratingInput || !ratingInput.checkValidity()) {
       isValid = false;
-      var container = $('input[name="rating_{{ answer.id }}"]').closest('.mb-4');
+      var container = $(ratingInput).closest('.mb-4');
+      $(ratingInput).addClass('is-invalid');
       container.css('border-color', '#dc3545');
       if (!firstError) firstError = container;
     } else {
-      $('input[name="rating_{{ answer.id }}"]').closest('.mb-4').css('border-color', '#e0e0e0');
+      $(ratingInput).removeClass('is-invalid');
+      $(ratingInput).closest('.mb-4').css('border-color', '#e0e0e0');
     }
     {% endfor %}
     
