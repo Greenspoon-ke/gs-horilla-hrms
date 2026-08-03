@@ -902,7 +902,6 @@ class LeaveRequest(HorillaModel):
         leave_type = getattr(self, "leave_type_id", None)
         if not leave_type:  # 836
             return
-        attachment = getattr(self, "attachment", None)
         requ_days = set(self.requested_dates())
         restricted_leaves = RestrictLeave.objects.all()
         request = getattr(horilla_middlewares._thread_locals, "request", None)
@@ -929,12 +928,6 @@ class LeaveRequest(HorillaModel):
         ):
             raise ValidationError(
                 _("Mismatch in the breakdown of the start and end date.")
-            )
-
-        # Attachment requirement
-        if leave_type and leave_type.require_attachment == "yes" and not attachment:
-            raise ValidationError(
-                {"attachment": _("An attachment is required for this leave request")}
             )
 
         # Overlapping leave check
