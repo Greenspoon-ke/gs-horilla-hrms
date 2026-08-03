@@ -1,0 +1,18 @@
+{% widthratio rating 5 100 as rating_percentage %}
+<div
+  class="d-flex align-items-center mt-2"
+  style="gap: 8px;"
+  role="img"
+  aria-label="{{ rating|floatformat:1 }} out of 5"
+>
+  <span
+    aria-hidden="true"
+    style="position: relative; display: inline-block; color: #d6d6d6; font-size: 1.5rem; line-height: 1;"
+  >
+    <span>★★★★★</span>
+    <span
+      style="position: absolute; inset: 0 auto 0 0; width: {{ rating_percentage }}%; overflow: hidden; white-space: nowrap; color: #f5b301;"
+    >★★★★★</span>
+  </span>
+  <strong>{{ rating|floatformat:1 }}/5</strong>
+</div>

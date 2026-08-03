@@ -3,7 +3,7 @@ import operator
 from dateutil.relativedelta import relativedelta
 from django.apps import apps
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
@@ -859,11 +859,14 @@ class ManagerRating(models.Model):
         null=True,
         blank=True,
     )
-    rating = models.IntegerField(
+    rating = models.DecimalField(
+        max_digits=2,
+        decimal_places=1,
         null=True,
         blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
         verbose_name=_("Rating"),
-        help_text=_("Manager's rating (1-5)"),
+        help_text=_("Manager's rating (1.0-5.0)"),
     )
     comment = models.TextField(
         null=True,

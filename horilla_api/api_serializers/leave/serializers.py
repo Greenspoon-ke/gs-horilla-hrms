@@ -20,7 +20,6 @@ def leave_Validations(self, data):
     )
     employee = data.get("employee_id")
     leave_type_id = data.get("leave_type_id")
-    attachment = data.get("attachment")
     available_leave = (
         AvailableLeave.objects.filter(
             leave_type_id=leave_type_id, employee_id=employee
@@ -71,9 +70,6 @@ def leave_Validations(self, data):
 
     if not effective_requested_days <= total_leave_days:
         raise serializers.ValidationError("Employee doesn't have enough leave days..")
-
-    if leave_type_id.require_attachment == "yes" and attachment == None:
-        errors["attachment"] = ["This field is required."]
 
     if errors:
         raise serializers.ValidationError(errors)
