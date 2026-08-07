@@ -1440,9 +1440,10 @@ def key_result_update(request, id):
 def send_feedback_notifications(request, feedback):  # 881
     """
     Send feedback notifications to the employee and all requested employees.
+    Link opens the answer form directly. Each person is notified once.
     """
 
-    redirect_url = f"{reverse('feedback-view')}?id={feedback.id}"
+    redirect_url = reverse("feedback-answer-get", kwargs={"id": feedback.id})
 
     messages = {
         "employee": {
@@ -1461,16 +1462,22 @@ def send_feedback_notifications(request, feedback):  # 881
         },
     }
 
-    if feedback.employee_id:
+    subject_employee = feedback.employee_id
+    if subject_employee and subject_employee.employee_user_id:
         notify.send(
             request.user.employee_get,
-            recipient=feedback.employee_id.employee_user_id,
+            recipient=subject_employee.employee_user_id,
             **messages["employee"],
             redirect=redirect_url,
             icon="chatbox-ellipses",
         )
 
     for employee in feedback.requested_employees():
+        # Subject employee already notified above — skip to avoid duplicate email
+        if subject_employee and employee.id == subject_employee.id:
+            continue
+        if not employee.employee_user_id:
+            continue
         notify.send(
             request.user.employee_get,
             recipient=employee.employee_user_id,
