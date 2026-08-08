@@ -2025,7 +2025,7 @@ def feedback_detailed_view_answer(request, id, emp_id):
                     employee_id=feedback.manager_id,
                     question_id__answerable_by_employee=False,
                     question_id__answerable_by_manager=True
-                ).select_related('question_id')
+                ).select_related('question_id').order_by('-question_id_id')
 
         context = {
             "answers": answers,
@@ -2261,12 +2261,13 @@ def feedback_manager_review(request, id):
     ).select_related("question_id")
 
     # Get questions that manager can answer (for additional manager-only questions)
+    # Newest-first so display order is 4, 3, 2, 1 when questions were created in order
     question_template = feedback.question_template_id
     all_questions = question_template.question.all()
     manager_only_questions = all_questions.filter(
         answerable_by_manager=True,
         answerable_by_employee=False
-    )
+    ).order_by("-id")
 
     options = QuestionOptions.objects.all()
 
@@ -2354,7 +2355,7 @@ def feedback_manager_review_post(request, id):
         manager_only_questions = question_template.question.filter(
             answerable_by_manager=True,
             answerable_by_employee=False
-        )
+        ).order_by("-id")
 
         for question in manager_only_questions:
             answer_value = request.POST.get(f"answer{question.id}")
@@ -2429,7 +2430,7 @@ def feedback_answer_view(request, id, **kwargs):
             employee_id=employee,
             question_id__answerable_by_employee=False,
             question_id__answerable_by_manager=True
-        ).select_related('question_id'))
+        ).select_related('question_id').order_by('-question_id_id'))
         
         # Check if manager has provided any review
         if not manager_ratings and not manager_only_answers:
@@ -2471,7 +2472,7 @@ def feedback_answer_view(request, id, **kwargs):
                 employee_id=feedback.manager_id,
                 question_id__answerable_by_employee=False,
                 question_id__answerable_by_manager=True
-            ).select_related('question_id')
+            ).select_related('question_id').order_by('-question_id_id')
 
     context = {
         "answers": answers,
