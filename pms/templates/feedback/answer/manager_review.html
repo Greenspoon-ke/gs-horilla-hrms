@@ -16,6 +16,30 @@
         </p>
       </div>
 
+      <!-- Overall Rating (running average of the ratings below) -->
+      <div class="oh-card mb-3" id="overallRatingCard">
+        <div class="oh-card__body d-flex align-items-center justify-content-between flex-wrap" style="gap: 12px;">
+          <div>
+            <span class="oh-label fw-bold">{% trans "Overall Rating" %}</span>
+            <p class="text-muted small mb-0">{% trans "Running average of the ratings you enter below" %}</p>
+          </div>
+          <div class="d-flex align-items-center" style="gap: 8px;">
+            <span
+              class="overall-rating-stars"
+              aria-hidden="true"
+              style="position: relative; display: inline-block; color: #d6d6d6; font-size: 1.8rem; line-height: 1;"
+            >
+              <span>★★★★★</span>
+              <span
+                class="overall-rating-stars__fill"
+                style="position: absolute; inset: 0 auto 0 0; width: 0; overflow: hidden; white-space: nowrap; color: #f5b301;"
+              >★★★★★</span>
+            </span>
+            <strong class="overall-rating-value" style="font-size: 1.3rem;">—/5</strong>
+          </div>
+        </div>
+      </div>
+
       <!-- Employee's Self-Assessment Answers -->
       <div class="oh-card mb-3">
         <div class="oh-card__header">
@@ -257,11 +281,37 @@ $(document).ready(function() {
     control.find('.manager-rating-value').text(isValid ? value.toFixed(1) + '/5' : '—/5');
   }
 
+  function updateOverallRating() {
+    var values = [];
+    $('.manager-rating-input').each(function() {
+      var value = Number.parseFloat(this.value);
+      if (Number.isFinite(value) && value >= 1 && value <= 5) {
+        values.push(value);
+      }
+    });
+
+    var card = $('#overallRatingCard');
+    if (!values.length) {
+      card.find('.overall-rating-value').text('—/5');
+      card.find('.overall-rating-stars__fill').css('width', '0%');
+      return;
+    }
+
+    var average = values.reduce(function(sum, value) { return sum + value; }, 0) / values.length;
+    var rounded = Math.round(average * 100) / 100;
+    var percentage = (rounded / 5) * 100;
+
+    card.find('.overall-rating-value').text(rounded.toFixed(2) + '/5');
+    card.find('.overall-rating-stars__fill').css('width', percentage + '%');
+  }
+
   $('.manager-rating-input').each(function() {
     updateManagerRatingPreview(this);
   }).on('input change', function() {
     updateManagerRatingPreview(this);
+    updateOverallRating();
   });
+  updateOverallRating();
 
   // Fix auto-scroll issue on star rating click
   $('.oh-rate label').on('click', function(e) {
