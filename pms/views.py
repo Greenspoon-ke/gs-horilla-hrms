@@ -1979,6 +1979,21 @@ def feedback_detailed_view(request, id, **kwargs):
         return HttpResponse(script)
 
 
+def get_manager_overall_rating(feedback, manager):
+    """
+    Average of a manager's per-answer ratings for an appraisal, rounded to 2dp.
+    Returns None if the manager hasn't rated anything (yet).
+    """
+    ratings = list(
+        ManagerRating.objects.filter(feedback=feedback, manager=manager)
+        .exclude(rating__isnull=True)
+        .values_list("rating", flat=True)
+    )
+    if not ratings:
+        return None
+    return round(sum(ratings) / len(ratings), 2)
+
+
 @login_required
 def feedback_detailed_view_answer(request, id, emp_id):
     """
@@ -2005,6 +2020,7 @@ def feedback_detailed_view_answer(request, id, emp_id):
 
         # For appraisal mode, attach manager ratings to employee's answers
         manager_only_answers = []
+        overall_rating = None
         if feedback.is_appraisal() and employee == feedback.employee_id:
             # Get manager's ratings for the employee's answers
             ratings = ManagerRating.objects.filter(
@@ -2012,12 +2028,15 @@ def feedback_detailed_view_answer(request, id, emp_id):
                 employee_answer__in=answers
             ).select_related('employee_answer')
             ratings_dict = {r.employee_answer_id: r for r in ratings}
-            
+
             # Attach ratings to answers using a different attribute name
             # to avoid conflict with the reverse ForeignKey relation
             for answer in answers:
                 answer.mgr_rating = ratings_dict.get(answer.id)
-            
+
+            if feedback.manager_id:
+                overall_rating = get_manager_overall_rating(feedback, feedback.manager_id)
+
             # Get manager's answers to manager-only questions
             if feedback.manager_id:
                 manager_only_answers = Answer.objects.filter(
@@ -2033,6 +2052,7 @@ def feedback_detailed_view_answer(request, id, emp_id):
             "feedback": feedback,
             "viewing_employee": employee,
             "manager_only_answers": manager_only_answers,
+            "overall_rating": overall_rating,
         }
         return render(request, "feedback/feedback_detailed_view_answer.html", context)
     else:
@@ -2436,7 +2456,7 @@ def feedback_answer_view(request, id, **kwargs):
         if not manager_ratings and not manager_only_answers:
             messages.info(request, _("Feedback is not answered yet"))
             return redirect(feedback_list_view)
-        
+
         context = {
             "answers": employee_answers_for_manager,  # Show employee answers with manager's ratings
             "feedback_id": feedback,
@@ -2444,6 +2464,7 @@ def feedback_answer_view(request, id, **kwargs):
             "key_result_feedback": key_result_feedback,
             "manager_only_answers": manager_only_answers,
             "is_manager_view": True,
+            "overall_rating": get_manager_overall_rating(feedback, employee),
         }
         return render(request, "feedback/answer/feedback_answer_view.html", context)
 
@@ -2453,6 +2474,7 @@ def feedback_answer_view(request, id, **kwargs):
         return redirect(feedback_list_view)
 
     # For Performance Appraisals (employee viewing their own feedback)
+    overall_rating = None
     if feedback.is_appraisal() and employee == feedback.employee_id:
         # Get manager's ratings for employee's answers
         ratings = ManagerRating.objects.filter(
@@ -2460,13 +2482,15 @@ def feedback_answer_view(request, id, **kwargs):
             employee_answer__in=answers
         ).select_related('employee_answer')
         ratings_dict = {r.employee_answer_id: r for r in ratings}
-        
+
         # Attach ratings to answers
         for answer in answers:
             answer.mgr_rating = ratings_dict.get(answer.id)
-        
-        # Get manager's answers to manager-only questions
+
         if feedback.manager_id:
+            overall_rating = get_manager_overall_rating(feedback, feedback.manager_id)
+
+            # Get manager's answers to manager-only questions
             manager_only_answers = Answer.objects.filter(
                 feedback_id=feedback,
                 employee_id=feedback.manager_id,
@@ -2480,6 +2504,7 @@ def feedback_answer_view(request, id, **kwargs):
         "feedback": feedback,
         "key_result_feedback": key_result_feedback,
         "manager_only_answers": manager_only_answers,
+        "overall_rating": overall_rating,
     }
     return render(request, "feedback/answer/feedback_answer_view.html", context)
 

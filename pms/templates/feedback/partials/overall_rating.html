@@ -1,0 +1,22 @@
+{% load i18n %}
+{% widthratio overall_rating 5 100 as rating_percentage %}
+<div class="mb-3 p-3" style="background-color: #e3f2fd; border-radius: 6px; border-left: 4px solid #1976d2;">
+  <small class="fw-bold" style="color: #1976d2;">{% trans "Overall Rating" %}</small>
+  <div
+    class="d-flex align-items-center mt-1"
+    style="gap: 8px;"
+    role="img"
+    aria-label="{{ overall_rating|floatformat:2 }} out of 5"
+  >
+    <span
+      aria-hidden="true"
+      style="position: relative; display: inline-block; color: #d6d6d6; font-size: 1.8rem; line-height: 1;"
+    >
+      <span>★★★★★</span>
+      <span
+        style="position: absolute; inset: 0 auto 0 0; width: {{ rating_percentage }}%; overflow: hidden; white-space: nowrap; color: #f5b301;"
+      >★★★★★</span>
+    </span>
+    <strong style="font-size: 1.2rem;">{{ overall_rating|floatformat:2 }}/5</strong>
+  </div>
+</div>
