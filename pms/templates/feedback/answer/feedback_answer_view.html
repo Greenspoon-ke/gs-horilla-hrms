@@ -17,10 +17,6 @@
   {% endif %}
   {% endif %}
 
-  {% if overall_rating %}
-    {% include "feedback/partials/overall_rating.html" %}
-  {% endif %}
-
   <div class="oh-activity-sidebar__body">
     <ol class="oh-activity-sidebar__qa-list" role="list">
       {% for answer in answers %}
@@ -102,7 +98,7 @@
       {% endif %}
 
       <!-- Manager-Only Questions Section (for Performance Appraisals) -->
-      {% if manager_only_answers %}
+      {% if manager_only_answers or overall_rating %}
         {% if is_manager_view %}
         <div class="oh-card mb-3 p-3 mt-3">
           <h6 class="mb-3" style="color: #F7941D;">{% trans "Manager's Evaluation" %}</h6>
@@ -112,6 +108,9 @@
             {% trans "Manager's Evaluation" %}
           </h4>
         </div>
+        {% endif %}
+        {% if overall_rating %}
+          {% include "feedback/partials/overall_rating.html" %}
         {% endif %}
         {% for answer in manager_only_answers %}
           <li class="oh-activity-sidebar__qa-item" style="border-left: 4px solid #F7941D; padding-left: 15px; margin-left: 0;">
