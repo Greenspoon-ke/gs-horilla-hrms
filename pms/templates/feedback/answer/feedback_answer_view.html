@@ -17,6 +17,10 @@
   {% endif %}
   {% endif %}
 
+  {% if overall_rating %}
+    {% include "feedback/partials/overall_rating.html" %}
+  {% endif %}
+
   <div class="oh-activity-sidebar__body">
     <ol class="oh-activity-sidebar__qa-list" role="list">
       {% for answer in answers %}

@@ -1,5 +1,8 @@
 {% load i18n %}
 {% load pmsfilters %}
+{% if overall_rating %}
+  {% include "feedback/partials/overall_rating.html" %}
+{% endif %}
 {% for answer in answers %}
 <li class="oh-activity-sidebar__qa-item">
     <span class="oh-activity-sidebar__q"> {{forloop.counter}}. {{answer.question_id.question}}?</span>
