@@ -17,6 +17,7 @@ from django import forms
 from django.contrib import messages
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator
+from django.db import transaction
 from django.db.models import ProtectedError, Q
 from django.db.utils import IntegrityError
 from django.forms import modelformset_factory
@@ -2037,13 +2038,14 @@ def feedback_detailed_view_answer(request, id, emp_id):
             if feedback.manager_id:
                 overall_rating = get_manager_overall_rating(feedback, feedback.manager_id)
 
-            # Get manager's answers to manager-only questions
+            # Get manager's answers to manager-only questions. Show whatever
+            # was actually answered, regardless of the question's current
+            # active/answerable state - already-submitted answers shouldn't
+            # be hidden retroactively by a later config change.
             if feedback.manager_id:
                 manager_only_answers = Answer.objects.filter(
                     feedback_id=feedback,
                     employee_id=feedback.manager_id,
-                    question_id__answerable_by_employee=False,
-                    question_id__answerable_by_manager=True
                 ).select_related('question_id').order_by('-question_id_id')
 
         context = {
@@ -2126,7 +2128,7 @@ def feedback_answer_get(request, id, **kwargs):
     employee = Employee.objects.filter(employee_user_id=user).first()
     answer = Answer.objects.filter(feedback_id=feedback, employee_id=employee)
     question_template = feedback.question_template_id
-    questions = question_template.question.all()
+    questions = question_template.question.filter(is_active=True)
     options = QuestionOptions.objects.all()
     feedback_employees = (
         [feedback.employee_id]
@@ -2286,7 +2288,8 @@ def feedback_manager_review(request, id):
     all_questions = question_template.question.all()
     manager_only_questions = all_questions.filter(
         answerable_by_manager=True,
-        answerable_by_employee=False
+        answerable_by_employee=False,
+        is_active=True,
     ).order_by("-id")
 
     options = QuestionOptions.objects.all()
@@ -2374,7 +2377,8 @@ def feedback_manager_review_post(request, id):
         question_template = feedback.question_template_id
         manager_only_questions = question_template.question.filter(
             answerable_by_manager=True,
-            answerable_by_employee=False
+            answerable_by_employee=False,
+            is_active=True,
         ).order_by("-id")
 
         for question in manager_only_questions:
@@ -2444,12 +2448,12 @@ def feedback_answer_view(request, id, **kwargs):
         for answer in employee_answers_for_manager:
             answer.mgr_rating = ratings_dict.get(answer.id)
         
-        # Get manager's answers to manager-only questions
+        # Get manager's answers to manager-only questions. Show whatever
+        # was actually answered, regardless of the question's current
+        # active/answerable state.
         manager_only_answers = list(Answer.objects.filter(
             feedback_id=feedback,
             employee_id=employee,
-            question_id__answerable_by_employee=False,
-            question_id__answerable_by_manager=True
         ).select_related('question_id').order_by('-question_id_id'))
         
         # Check if manager has provided any review
@@ -2490,12 +2494,12 @@ def feedback_answer_view(request, id, **kwargs):
         if feedback.manager_id:
             overall_rating = get_manager_overall_rating(feedback, feedback.manager_id)
 
-            # Get manager's answers to manager-only questions
+            # Get manager's answers to manager-only questions. Show whatever
+            # was actually answered, regardless of the question's current
+            # active/answerable state.
             manager_only_answers = Answer.objects.filter(
                 feedback_id=feedback,
                 employee_id=feedback.manager_id,
-                question_id__answerable_by_employee=False,
-                question_id__answerable_by_manager=True
             ).select_related('question_id').order_by('-question_id_id')
 
     context = {
@@ -2593,7 +2597,12 @@ def get_feedback_overview(request, obj_id):
         request, feedback, perm="pms.view_feedback"
     ):
         question_template = feedback.question_template_id
-        questions = question_template.question.all()
+        # Show a question if it's still active, or if it already has an
+        # answer on this feedback - answered questions stay visible even
+        # after being deactivated later.
+        questions = question_template.question.filter(
+            Q(is_active=True) | Q(answer_question_id__feedback_id=feedback)
+        ).distinct()
         feedback_answers = feedback.feedback_answer.all()
         kr_feedbacks = feedback.feedback_key_result.all()
         feedback_overview = {}
@@ -2885,23 +2894,32 @@ def question_delete(request, id):
         it will redirect to  question_template_detailed_view.
     """
 
+    question = Question.objects.filter(id=id).first()
+    if not question:
+        messages.error(request, _("Question not found."))
+        return HttpResponse("<script>window.location.reload();</script>")
+
     try:
         # Code that may trigger the FOREIGN KEY constraint failed error
-        question = Question.objects.filter(id=id).first()
-        temp_id = question.template_id.id
-        QuestionOptions.objects.filter(question_id=question).delete()
-        question.delete()
+        with transaction.atomic():
+            QuestionOptions.objects.filter(question_id=question).delete()
+            question.delete()
         messages.success(request, _("Question deleted successfully!"))
         return HttpResponse("<script>reloadMessage();</script>")
 
-    except Question.DoesNotExist:
-        messages.error(request, _("Question not found."))
-    except IntegrityError:
-        messages.error(
-            request, _("Failed to delete question: Question template is in use.")
+    except (IntegrityError, ProtectedError):
+        # Existing answers reference this question - archive it instead of
+        # losing those answers, and stop offering it on new feedback.
+        question.is_active = False
+        question.save()
+        messages.info(
+            request,
+            _(
+                "This question already has answers, so it was marked inactive "
+                "instead of deleted. Existing answers stay visible; it just "
+                "won't be offered on new feedback."
+            ),
         )
-    except ProtectedError:
-        messages.error(request, _("Related entries exist."))
     except Exception as e:
         messages.error(request, _(f"Unexpected error: {str(e)}"))
 

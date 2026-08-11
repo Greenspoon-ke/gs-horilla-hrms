@@ -42,6 +42,31 @@
                                         {% render_field form.question disabled='disabled' %}
                                     </div>
                                     
+                                    <!-- Active Status - Display Mode -->
+                                    <div class="col-12 mt-3 answerable-by-display">
+                                        <label class="oh-label text-muted fw-bold mb-2">{% trans "Status" %}</label>
+                                        <div class="d-flex flex-wrap gap-2">
+                                            {% if form.instance.is_active %}
+                                                <span class="badge bg-success">{% trans "Active" %}</span>
+                                            {% else %}
+                                                <span class="badge bg-secondary">{% trans "Inactive" %}</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+
+                                    <!-- Active Status - Edit Mode (hidden until edit is clicked) -->
+                                    <div class="col-12 mt-3 answerable-by-edit d-none">
+                                        <div class="oh-switch">
+                                            <input type="checkbox" name="is_active" class="oh-switch__checkbox"
+                                                id="id_is_active_{{form.instance.id}}"
+                                                {% if form.instance.is_active %}checked{% endif %}>
+                                            <label class="oh-switch__label" for="id_is_active_{{form.instance.id}}">
+                                                {% trans "Active" %}
+                                            </label>
+                                        </div>
+                                        <small class="text-muted">{% trans "Uncheck to stop offering this question on new feedback. Answers already given to it stay visible." %}</small>
+                                    </div>
+
                                     <!-- Answerable By Section - Display Mode -->
                                     <div class="col-12 mt-3 answerable-by-display">
                                         <label class="oh-label text-muted fw-bold mb-2">{% trans "Who Can Answer" %}</label>
@@ -166,7 +191,7 @@
                                     <!-- delete object form  -->
                                     {% csrf_token %}
                                     {% if perms.pms.delete_question or request.user|filtersubordinates %}
-                                        <a hx-confirm="{% trans 'Do you want to delete the question?' %}"
+                                        <a hx-confirm="{% trans 'Do you want to delete the question? If it already has answers, it will be marked inactive instead so those answers stay intact.' %}"
                                             hx-post="{% url 'question-delete' id=form.instance.id %}"
                                             hx-target="#pmsQuestion{{form.instance.id}}"
                                             hx-swap="outerHTML"
