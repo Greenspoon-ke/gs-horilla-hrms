@@ -1,4 +1,5 @@
 from django.apps import apps
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
 
@@ -192,7 +193,12 @@ if apps.is_installed("pms"):
                     or "-"
                 )
 
-                questions = feedback.question_template_id.question.all()
+                # Show a question if it's still active, or if it already has
+                # an answer on this feedback - answered questions stay in
+                # the report even after being deactivated later.
+                questions = feedback.question_template_id.question.filter(
+                    Q(is_active=True) | Q(answer_question_id__feedback_id=feedback)
+                ).distinct()
 
                 # Fetch ALL answers for this feedback and map them grouped by question
                 answers = feedback.feedback_answer.select_related(

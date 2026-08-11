@@ -998,6 +998,12 @@ class QuestionForm(ModelForm):
         label=_("Others"),
         widget=forms.CheckboxInput(attrs={"class": "oh-switch__checkbox"}),
     )
+    is_active = forms.BooleanField(
+        required=False,
+        initial=True,
+        label=_("Active"),
+        widget=forms.CheckboxInput(attrs={"class": "oh-switch__checkbox"}),
+    )
 
     class Meta:
         """
@@ -1005,7 +1011,7 @@ class QuestionForm(ModelForm):
         """
 
         model = Question
-        exclude = ["question_option_id", "template_id", "is_active"]
+        exclude = ["question_option_id", "template_id"]
         # widgets = {
         #     "question_type": forms.Select(
         #         attrs={
@@ -1028,6 +1034,7 @@ class QuestionForm(ModelForm):
             self.fields["answerable_by_colleague"].initial = self.instance.answerable_by_colleague
             self.fields["answerable_by_subordinate"].initial = self.instance.answerable_by_subordinate
             self.fields["answerable_by_others"].initial = self.instance.answerable_by_others
+            self.fields["is_active"].initial = self.instance.is_active
         if (
             self.instance.pk
             and self.instance.question_type == "4"
