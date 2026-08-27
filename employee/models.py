@@ -551,6 +551,21 @@ class Employee(models.Model):
             view_ownprofile = Permission.objects.get(codename="view_ownprofile")
             user.user_permissions.add(view_ownprofile)
             user.user_permissions.add(change_ownprofile)
+        elif (
+            prev_employee
+            and prev_employee.email != self.email
+            and self.email
+            and not User.objects.exclude(pk=employee.employee_user_id.pk)
+            .filter(username__iexact=self.email)
+            .exists()
+        ):
+            # Keep the linked login account's username/email in sync
+            # when the employee's email is edited, so login and
+            # password reset keep working against the current address.
+            user = employee.employee_user_id
+            user.username = self.email
+            user.email = self.email
+            user.save(update_fields=["username", "email"])
 
         if not hasattr(self, "employee_work_info"):
             hq_company = Company.objects.filter(hq=True).first()
