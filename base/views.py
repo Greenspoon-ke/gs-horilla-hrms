@@ -569,17 +569,25 @@ def login_user(request):
     Handles user login and authentication.
     """
     if request.method == "POST":
-        username = request.POST.get("username")
+        username = request.POST.get("username", "").strip()
         password = request.POST.get("password")
         next_url = request.GET.get("next", "/")
         query_params = request.GET.dict()
         query_params.pop("next", None)
         params = urlencode(query_params)
 
-        user = authenticate(request, username=username, password=password)
+        # Usernames are email addresses, which are conventionally
+        # case-insensitive, but Django's ModelBackend matches username
+        # exactly. Resolve the stored username case-insensitively first
+        # so login doesn't depend on the exact case a user types.
+        user_object = User.objects.filter(username__iexact=username).first()
+        user = authenticate(
+            request,
+            username=user_object.username if user_object else username,
+            password=password,
+        )
 
         if not user:
-            user_object = User.objects.filter(username=username).first()
             if user_object and not user_object.is_active:
                 messages.warning(request, _("Access Denied: Your account is blocked."))
             else:
