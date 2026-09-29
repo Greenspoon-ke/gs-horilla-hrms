@@ -27,7 +27,6 @@ from . import settings
 def health_check(request):
     return JsonResponse({"status": "ok"}, status=200)
 
-
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("accounts/", include("django.contrib.auth.urls")),

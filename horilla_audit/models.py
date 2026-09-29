@@ -81,22 +81,16 @@ def pre_create_horilla_audit_log(sender, instance, *args, **kwargs):
     """
     Pre create horill audit log method
     """
-    try:
-        history_instance = kwargs["history_instance"]
-        history_instance.history_title = HistoricalRecords.thread.request.POST.get(
-            "history_title"
-        )
-        history_instance.history_description = (
-            HistoricalRecords.thread.request.POST.get("history_description")
-        )
-        history_instance.history_highlight = (
-            True
-            if HistoricalRecords.thread.request.POST.get("history_highlight") == "on"
-            else False
-        )
+    history_instance = kwargs.get("history_instance")
+    if not history_instance:
+        return
+    request = getattr(HistoricalRecords.thread, 'request', None)
+    if not request:
         instance.skip_history = True
-    except:
-        pass
+        return
+    history_instance.history_title = request.POST.get("history_title")
+    history_instance.history_description = request.POST.get("history_description")
+    history_instance.history_highlight = request.POST.get("history_highlight")
 
 
 @receiver(post_create_historical_record)

@@ -14,6 +14,7 @@ import os
 from os.path import join
 from pathlib import Path
 
+import sentry_sdk
 import environ
 from django.contrib.messages import constants as messages
 
@@ -159,7 +160,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/4.1/howto/static-files/
 
 STATIC_URL = "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"
+STATIC_ROOT = "/var/www/staticfiles"
 
 STATICFILES_DIRS = [
     BASE_DIR / "static",
@@ -168,7 +169,7 @@ STATICFILES_DIRS = [
 STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 
 MEDIA_URL = "/media/"
-MEDIA_ROOT = os.path.join(BASE_DIR, "media/")
+MEDIA_ROOT = "/var/www/mediafiles"
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.1/ref/settings/#default-auto-field
 
@@ -243,3 +244,38 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+def before_send(event, hint):
+    """
+    This function intercepts the error before it hits Sentry's servers.
+    """
+    if 'exc_info' in hint:
+        exc_type, exc_value, tb = hint['exc_info']
+        
+        # Check the name of the error as a string to avoid import issues
+        error_name = exc_type.__name__
+        
+        # List of bogus errors to silence
+        ignored_errors = [
+            'Http404', 
+            'DisallowedHost', 
+            'InterfaceError', 
+            'OperationalError'
+        ]
+        
+        if error_name in ignored_errors:
+            return None # This tells Sentry: "Don't send this, and don't count it!"
+
+    return event
+
+# Sentry setup
+sentry_sdk.init(
+    dsn="https://c6254700bddd3392aa8108ccbc2a6556@o4510061397803008.ingest.de.sentry.io/4510061402980432",
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+    before_send=before_send,
+    # Keep your sample rates low to save quota
+    traces_sample_rate=0.01,
+)
+
