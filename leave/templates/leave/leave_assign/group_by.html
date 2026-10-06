@@ -145,7 +145,7 @@
                       class="oh-btn-group"
                       onclick="event.stopPropagation();"
                     >
-                      {% if perms.leave.change_availableleave or request.user|is_reportingmanager %}
+                      {% if perms.leave.change_availableleave %}
                       <button
                         class="oh-btn oh-btn--light-bkg w-100"
                         title="{% trans 'Edit' %}"

@@ -404,7 +404,16 @@ class AvailableLeaveUpdateForm(BaseModelForm):
         - Meta: Inner class defining metadata options.
             - model: The model associated with the form (AvailableLeave).
             - fields: A list of fields to include in the form.
+        - history_description: Mandatory reason for the change.
     """
+
+    # The field name matches the POST key that horilla_audit's pre-create hook
+    # copies onto the history row, so the reason is stored with no view glue.
+    history_description = forms.CharField(
+        label=_("Reason"),
+        max_length=255,
+        widget=forms.Textarea(attrs={"rows": 2}),
+    )
 
     class Meta:
         """
@@ -412,7 +421,9 @@ class AvailableLeaveUpdateForm(BaseModelForm):
         """
 
         model = AvailableLeave
-        fields = ["available_days", "carryforward_days", "is_active"]
+        # is_active is not rendered by the template; leaving it here made every
+        # edit post it as unchecked and silently deactivate the record.
+        fields = ["available_days", "carryforward_days"]
 
 
 class UserLeaveRequestForm(BaseModelForm):
