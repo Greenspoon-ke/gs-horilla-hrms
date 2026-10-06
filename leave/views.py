@@ -1665,7 +1665,9 @@ def leave_assign(request):
 
 @login_required
 @hx_request_required
-@manager_can_enter("leave.change_availableleave")
+# Strict permission, not manager_can_enter: that decorator also admits every
+# reporting manager, and balance corrections are HR-only.
+@permission_required("leave.change_availableleave")
 def available_leave_update(request, id):
     """
     function used to update available leave of an assigned leave type of an employee.

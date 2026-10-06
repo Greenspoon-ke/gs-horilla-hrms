@@ -42,6 +42,10 @@
             <label for="{{form.carryforward_days.id_for_label}}" class="oh-label d-block">{{form.carryforward_days.label}}</label>
             {{form.carryforward_days}} {{form.carryforward_days.errors}}
         </div>
+        <div class="oh-modal__dialog-body pb-2">
+            <label for="{{form.history_description.id_for_label}}" class="oh-label d-block">{{form.history_description.label}}</label>
+            {{form.history_description}} {{form.history_description.errors}}
+        </div>
         <div class="oh-modal__dialog-footer pb-3">
             <button type="submit" class="oh-btn oh-btn--secondary oh-btn--shadow">
                 {% trans "Save" %}
