@@ -25,6 +25,7 @@ from horilla import horilla_middlewares
 from horilla_widgets.forms import HorillaForm, HorillaModelForm
 from horilla_widgets.widgets.horilla_multi_select_field import HorillaMultiSelectField
 from horilla_widgets.widgets.select_widgets import HorillaMultiSelectWidget
+from leave.accrual import prepare_new_balance
 from leave.methods import get_leave_day_attendance
 from leave.models import (
     AvailableLeave,
@@ -138,10 +139,12 @@ class LeaveTypeForm(ConditionForm):
         if employees := self.data.getlist("employee_id"):
             for employee_id in employees:
                 employee = Employee.objects.get(id=employee_id)
-                AvailableLeave(
-                    leave_type_id=leave_type,
-                    employee_id=employee,
-                    available_days=leave_type.total_days,
+                prepare_new_balance(
+                    AvailableLeave(
+                        leave_type_id=leave_type,
+                        employee_id=employee,
+                        available_days=leave_type.total_days,
+                    )
                 ).save()
 
     def __init__(self, *args, **kwargs):
