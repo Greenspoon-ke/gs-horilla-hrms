@@ -51,7 +51,7 @@ from horilla.decorators import (
 from horilla.group_by import group_by_queryset
 from horilla.horilla_settings import DYNAMIC_URL_PATTERNS
 from horilla.methods import get_horilla_model_class, remove_dynamic_url
-from leave.accrual import prepare_new_balance
+from leave.accrual import booking_carry_cap, prepare_new_balance
 from leave.decorators import *
 from leave.filters import *
 from leave.forms import *
@@ -3949,11 +3949,13 @@ def employee_available_leave_count(request):
 
             if leave_type.carryforward_type == "no carryforward":
                 total_leave_days = 0
-            elif (
-                leave_type.carryforward_type in ["carryforward", "carryforward expire"]
-                and leave_type.carryforward_max < total_leave_days
-            ):
-                total_leave_days = leave_type.carryforward_max
+            elif leave_type.carryforward_type in [
+                "carryforward",
+                "carryforward expire",
+            ]:
+                total_leave_days = min(
+                    total_leave_days, booking_carry_cap(available_leave)
+                )
 
             total_leave_days += forcasted_days
 

@@ -652,6 +652,22 @@ class HolidayGetUpdateDeleteAPIView(APIView):
         return Response(status=200)
 
 
+def spend_carry_first(leave_request, available_leave):
+    """
+    Deduct an approved request the same way as the web approve view
+    (leave/views.py, leave_request_approve): carried days first, then this
+    year's days. Records the split on the request so a rejection refunds it.
+    """
+    carry = max(available_leave.carryforward_days, 0)
+    from_carry = min(leave_request.requested_days, carry)
+    from_available = leave_request.requested_days - from_carry
+    available_leave.carryforward_days -= from_carry
+    available_leave.available_days -= from_available
+    leave_request.approved_carryforward_days = from_carry
+    leave_request.approved_available_days = from_available
+    available_leave.save()
+
+
 class LeaveRequestApproveAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -662,20 +678,7 @@ class LeaveRequestApproveAPIView(APIView):
             raise serializers.ValidationError(e)
 
     def leave_approve_calculation(self, leave_request, available_leave):
-        if leave_request.requested_days > available_leave.available_days:
-            leave = leave_request.requested_days - available_leave.available_days
-            leave_request.approved_available_days = available_leave.available_days
-            available_leave.available_days = 0
-            available_leave.carryforward_days = (
-                available_leave.carryforward_days - leave
-            )
-
-            leave_request.approved_carryforward_days = leave
-        else:
-            temp = available_leave.available_days
-            available_leave.available_days = temp - leave_request.requested_days
-            leave_request.approved_available_days = leave_request.requested_days
-        available_leave.save()
+        spend_carry_first(leave_request, available_leave)
 
     def leave_multiple_approve(self, request, leave_request, available_leave):
         if request.user.is_superuser:
@@ -885,19 +888,7 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
         raise serializers.ValidationError("Nothing to approve")
 
     def leave_approve_calculation(self, leave_request, available_leave):
-        if leave_request.requested_days > available_leave.available_days:
-            leave = leave_request.requested_days - available_leave.available_days
-            leave_request.approved_available_days = available_leave.available_days
-            available_leave.available_days = 0
-            available_leave.carryforward_days = (
-                available_leave.carryforward_days - leave
-            )
-            leave_request.approved_carryforward_days = leave
-        else:
-            temp = available_leave.available_days
-            available_leave.available_days = temp - leave_request.requested_days
-            leave_request.approved_available_days = leave_request.requested_days
-        available_leave.save()
+        spend_carry_first(leave_request, available_leave)
 
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request):

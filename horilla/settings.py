@@ -233,6 +233,18 @@ USE_L10N = True
 
 USE_TZ = True
 
+# Annual Leave carry-over rules (leave/accrual.py). All off by default.
+# Department names (comma-separated) exempt from the 10-day year-end cap.
+LEAVE_CARRY_EXEMPT_DEPARTMENTS = env.list("LEAVE_CARRY_EXEMPT_DEPARTMENTS", default=[])
+# Cap for those departments; empty means no limit.
+LEAVE_CARRY_EXEMPT_CAP = env("LEAVE_CARRY_EXEMPT_CAP", default="")
+# Unused carried days lapse when June is credited ("use by 30 June").
+LEAVE_CARRY_EXPIRES_30_JUNE = env.bool("LEAVE_CARRY_EXPIRES_30_JUNE", default=False)
+# Whether the exempt departments also skip that 30 June expiry.
+LEAVE_CARRY_EXEMPT_SKIP_EXPIRY = env.bool(
+    "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", default=False
+)
+
 # Production settings
 if not DEBUG:
     SECURE_BROWSER_XSS_FILTER = True

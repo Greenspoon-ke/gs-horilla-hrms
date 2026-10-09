@@ -14,7 +14,10 @@ revisions):
   Nothing accrues before 1 January 2026. Month M is credited on the 1st of
   M+1, using the Africa/Nairobi date whatever the server's TIME_ZONE.
 - When December is credited the leave year closes: up to 10 days carry
-  forward, the rest lapses, and the new year starts at 0.
+  forward, the rest lapses, and the new year starts at 0. Departments listed
+  in LEAVE_CARRY_EXEMPT_DEPARTMENTS use LEAVE_CARRY_EXEMPT_CAP instead (empty:
+  no limit). With LEAVE_CARRY_EXPIRES_30_JUNE, carried days still unused when
+  June is credited lapse (carry is spent first, so what is left is unused).
 - The one-off rebuild sets 2026 balances to opening carry + accrued - taken,
   where taken is approved Annual Leave starting on or after 1 January 2026 and
   is spent from carry first. HR's 2026 joiners sheet is the list of 2026
@@ -45,6 +48,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import connection, transaction
 from django.db.models import Sum
 
+from base.models import Department
 from leave.models import AvailableLeave, LeaveRequest, LeaveType
 
 ACCRUAL_LEAVE_TYPE_NAME = "Annual Leave"
@@ -91,6 +95,85 @@ SNAPSHOT_COLUMNS = [
 
 class AccrualRefused(Exception):
     """The run must not go ahead. Raised before anything is written."""
+
+
+@dataclass(frozen=True)
+class CarryRules:
+    """HR's carry-over settings (LEAVE_CARRY_* in horilla/settings.py)."""
+
+    exempt_departments: frozenset = frozenset()
+    exempt_cap: float = math.inf
+    expires_30_june: bool = False
+    exempt_skip_expiry: bool = False
+
+    def is_exempt(self, employee):
+        return department_name(employee) in self.exempt_departments
+
+    def cap_for(self, employee):
+        return self.exempt_cap if self.is_exempt(employee) else CARRY_CAP
+
+    def expires_for(self, employee):
+        if not self.expires_30_june:
+            return False
+        return not (self.exempt_skip_expiry and self.is_exempt(employee))
+
+
+def carry_rules():
+    """Read and check the settings; a typo refuses the run instead of guessing."""
+    names = {
+        name.strip().casefold()
+        for name in getattr(settings, "LEAVE_CARRY_EXEMPT_DEPARTMENTS", [])
+        if name.strip()
+    }
+    known = {
+        (name or "").strip().casefold()
+        for name in Department._base_manager.values_list("department", flat=True)
+    }
+    if names - known:
+        raise AccrualRefused(
+            "Unknown department(s) in LEAVE_CARRY_EXEMPT_DEPARTMENTS: "
+            + ", ".join(sorted(names - known))
+        )
+    raw = str(getattr(settings, "LEAVE_CARRY_EXEMPT_CAP", "") or "").strip()
+    try:
+        cap = math.inf if raw == "" else float(raw)
+    except ValueError:
+        raise AccrualRefused("LEAVE_CARRY_EXEMPT_CAP must be a number or empty.")
+    if cap < CARRY_CAP:
+        raise AccrualRefused(
+            f"LEAVE_CARRY_EXEMPT_CAP {cap:g} is below the standard cap {CARRY_CAP}."
+        )
+    return CarryRules(
+        frozenset(names),
+        cap,
+        bool(getattr(settings, "LEAVE_CARRY_EXPIRES_30_JUNE", False)),
+        bool(getattr(settings, "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", False)),
+    )
+
+
+def department_name(employee):
+    try:
+        department = employee.employee_work_info.department_id
+    except ObjectDoesNotExist:
+        return ""
+    return (department.department or "").strip().casefold() if department else ""
+
+
+def booking_carry_cap(available_leave):
+    """
+    Carried days a leave request may use (LeaveRequest.clean and the request
+    form's counter): the exempt teams' cap on accrual rows, else the type's.
+    """
+    type_cap = available_leave.leave_type_id.carryforward_max or 0
+    if available_leave.last_accrual_date is None or not is_accrual_type(
+        available_leave.leave_type_id
+    ):
+        return type_cap
+    try:
+        rules = carry_rules()
+    except AccrualRefused:
+        return type_cap
+    return max(type_cap, rules.cap_for(available_leave.employee_id))
 
 
 @dataclass
@@ -241,7 +324,8 @@ def _current(row):
 
 
 def plan_rebuild_row(
-    row, leave_type, through, sheet, overrides, opening_carry, negative
+    row, leave_type, through, sheet, overrides, opening_carry, negative,
+    rules=CarryRules(),
 ):
     """Absolute 2026 balance for one row, credited through the month of ``through``."""
     employee = row.employee_id
@@ -284,8 +368,9 @@ def plan_rebuild_row(
         if pre_epoch:
             return plan.stop("skip", "wait: needs opening carry from HR")
         opening = 0.0
-    if opening > CARRY_CAP:
-        return plan.stop("refuse", f"opening carry {opening} above cap {CARRY_CAP}")
+    cap = rules.cap_for(employee)
+    if opening > cap:
+        return plan.stop("refuse", f"opening carry {opening} above cap {cap:g}")
 
     plan.start = accrual_start(joined)
     plan.months = months_between(plan.start, marker)
@@ -318,7 +403,7 @@ def plan_rebuild_row(
     return plan
 
 
-def plan_daily_row(row, leave_type, today):
+def plan_daily_row(row, leave_type, today, rules=CarryRules()):
     """Credit every whole month due up to ``today`` and close any finished year."""
     employee = row.employee_id
     plan = RowPlan(row.pk, employee_code(employee), _current(row))
@@ -334,21 +419,25 @@ def plan_daily_row(row, leave_type, today):
     # a year; a person should look before a year's leave is granted at once.
     if plan.months > MONTHS_PER_YEAR:
         return plan.stop("refuse", f"{plan.months} months due")
-    if row.carryforward_days > CARRY_CAP:
-        return plan.stop(
-            "refuse", f"carry {row.carryforward_days} above cap {CARRY_CAP}"
-        )
+    cap = rules.cap_for(employee)
+    if row.carryforward_days > cap:
+        return plan.stop("refuse", f"carry {row.carryforward_days} above cap {cap:g}")
 
     rate = leave_type.total_days / MONTHS_PER_YEAR
+    expires = rules.expires_for(employee)
     available, carry = row.available_days, row.carryforward_days
-    closed = []
+    closed, expired = [], 0.0
     for _ in range(plan.months):
         available += rate
         last += relativedelta(months=1)
+        if last.month == 7 and expires and carry > 0:
+            # June was just credited: carried days not used by 30 June lapse.
+            expired += carry
+            carry = 0.0
         if last.month == 1:  # December was just credited: close the year
             balance = available + carry
             if balance >= 0:
-                carry, available = min(CARRY_CAP, balance), 0.0
+                carry, available = min(cap, balance), 0.0
             else:
                 # D8 "record": the debt stays visible in available_days;
                 # a negative carry would be zeroed by pre_save_processing.
@@ -363,6 +452,9 @@ def plan_daily_row(row, leave_type, today):
     reason = f"Monthly accrual: {plan.months} month(s) to {credited_to:%b %Y}"
     if closed:
         reason += f"; {', '.join(closed)} closed, carry {plan.proposed[1]:g}"
+    if expired:
+        plan.flags.append("CARRY_EXPIRED")
+        reason += f"; carry {expired:g} expired 30 Jun"
     plan.change_reason = reason[:MAX_REASON_LENGTH]
     plan.action = "change"
     return plan
@@ -535,8 +627,9 @@ def run_daily(apply=False, out_dir="~/hrms-local", today=None):
     """Credit due months on every enrolled row. Dry run unless ``apply``."""
     today = today or nairobi_today()
     leave_type = accrual_leave_type()
+    rules = carry_rules()
     plans = [
-        plan_daily_row(row, leave_type, today)
+        plan_daily_row(row, leave_type, today, rules)
         for row in _candidate_rows(leave_type, enrolled_only=True)
     ]
     changes = [plan for plan in plans if plan.action == "change"]
@@ -553,7 +646,7 @@ def run_daily(apply=False, out_dir="~/hrms-local", today=None):
         with advisory_lock():
             result["snapshot"] = write_snapshot(directory, leave_type, _stamp())
             result["saved"], result["stale"] = _apply_plans(
-                changes, lambda row: plan_daily_row(row, leave_type, today)
+                changes, lambda row: plan_daily_row(row, leave_type, today, rules)
             )
     return result
 
@@ -584,12 +677,13 @@ def run_rebuild(
     overrides, opening_carry = overrides or {}, opening_carry or {}
 
     leave_type = accrual_leave_type()
+    rules = carry_rules()
     rows = _candidate_rows(leave_type, enrolled_only=False)
     known = {employee_code(row.employee_id).upper() for row in rows}
 
     def replan(row):
         return plan_rebuild_row(
-            row, leave_type, through, sheet, overrides, opening_carry, negative
+            row, leave_type, through, sheet, overrides, opening_carry, negative, rules
         )
 
     plans = [replan(row) for row in rows]

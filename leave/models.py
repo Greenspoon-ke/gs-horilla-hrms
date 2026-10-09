@@ -987,7 +987,11 @@ class LeaveRequest(HorillaModel):
 
         available_days = available_leave.available_days or 0
         carryforward_days = available_leave.carryforward_days or 0
-        carryforward_max = available_leave.leave_type_id.carryforward_max or 0
+        # Imported here: leave.accrual imports this module.
+        from leave.accrual import booking_carry_cap
+
+        # The type's cap, or the exempt teams' cap on accrual rows.
+        carryforward_max = booking_carry_cap(available_leave)
         carryforward_type = available_leave.leave_type_id.carryforward_type
 
         if carryforward_type in ["carryforward", "carryforward expire"]:
