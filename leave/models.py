@@ -421,6 +421,11 @@ class AvailableLeave(HorillaModel):
     expired_date = models.DateField(
         blank=True, null=True, verbose_name=_("CarryForward Expired Date")
     )
+    # Null means the row is not on monthly accrual and the accrual command never
+    # touches it. Otherwise: the 1st of the month after the last credited month.
+    last_accrual_date = models.DateField(
+        blank=True, null=True, verbose_name=_("Last Accrual Date")
+    )
     objects = HorillaCompanyManager(
         related_company_field="employee_id__employee_work_info__company_id"
     )
@@ -438,6 +443,11 @@ class AvailableLeave(HorillaModel):
         return f"{self.employee_id} | {self.leave_type_id}"
 
     def forcasted_leaves(self, date):
+        # Rows on monthly accrual earn their days month by month, so next
+        # year's entitlement must not be bookable in advance (HR decision D6).
+        # Used by LeaveRequest.clean and the request form's balance counter.
+        if self.last_accrual_date is not None:
+            return 0
         if isinstance(date, str):
             date = datetime.strptime(date, "%Y-%m-%d").date()
         next_reset_date = self.leave_type_id.leave_type_next_reset_date()

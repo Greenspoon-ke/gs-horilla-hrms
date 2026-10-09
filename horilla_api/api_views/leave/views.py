@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 
 from base.methods import filtersubordinates
 from horilla_api.api_serializers.leave.serializers import *
+from leave.accrual import prepare_new_balance
 from leave.filters import *
 from leave.methods import filter_conditional_leave_request
 from leave.models import LeaveRequest
@@ -338,11 +339,13 @@ class AssignLeaveGetCreateAPIView(APIView):
                     if not AvailableLeave.objects.filter(
                         employee_id=employee_id, leave_type_id=leave_type_id
                     ).exists():
-                        AvailableLeave.objects.create(
-                            employee_id=employee_id,
-                            leave_type_id=leave_type_id,
-                            available_days=leave_type_id.total_days,
-                        )
+                        prepare_new_balance(
+                            AvailableLeave(
+                                employee_id=employee_id,
+                                leave_type_id=leave_type_id,
+                                available_days=leave_type_id.total_days,
+                            )
+                        ).save()
                         with contextlib.suppress(Exception):
                             notify.send(
                                 request.user.employee_get,
@@ -808,10 +811,15 @@ class LeaveAllocationApproveAPIView(APIView):
             raise serializers.ValidationError(e)
 
     def approve_calculations(self, leave_allocation_request):
-        available_leave = AvailableLeave.objects.get_or_create(
+        available_leave = AvailableLeave.objects.filter(
             employee_id=leave_allocation_request.employee_id,
             leave_type_id=leave_allocation_request.leave_type_id,
-        )[0]
+        ).first() or prepare_new_balance(
+            AvailableLeave(
+                employee_id=leave_allocation_request.employee_id,
+                leave_type_id=leave_allocation_request.leave_type_id,
+            )
+        )
         available_leave.available_days += leave_allocation_request.requested_days
         available_leave.save()
 

@@ -51,6 +51,7 @@ from horilla.decorators import (
 from horilla.group_by import group_by_queryset
 from horilla.horilla_settings import DYNAMIC_URL_PATTERNS
 from horilla.methods import get_horilla_model_class, remove_dynamic_url
+from leave.accrual import prepare_new_balance
 from leave.decorators import *
 from leave.filters import *
 from leave.forms import *
@@ -1403,7 +1404,7 @@ def leave_assign_one(request, obj_id):
                     leave.available_days + leave.carryforward_days, 0
                 )
                 leave.carryforward_days = max(leave.carryforward_days, 0)
-                available_leaves.append(leave)
+                available_leaves.append(prepare_new_balance(leave))
 
             AvailableLeave.objects.bulk_create(available_leaves)
             assigned_count = len(available_leaves)
@@ -1622,8 +1623,8 @@ def leave_assign(request):
                             employee_id=employee,
                             available_days=leave_type.total_days,
                         )
-                        new_assignments.append(new_assignment)
                         new_assignment.pre_save_processing()
+                        new_assignments.append(prepare_new_balance(new_assignment))
                         success_messages.add(employee.employee_user_id)
                     else:
                         info_messages.add(employee.employee_user_id)
@@ -1875,7 +1876,8 @@ def assign_leave_type_import(request):
                 available_leave.total_leave_days = (
                     available_leave.carryforward_days + available_leave.available_days
                 )
-            assign_leave_list.append(available_leave)
+            # Annual Leave ignores the sheet's days: it starts at 0 on accrual.
+            assign_leave_list.append(prepare_new_balance(available_leave))
 
         # Bulk create available leaves
         if assign_leave_list:
@@ -3554,9 +3556,11 @@ def leave_allocation_request_approve(request, req_id):
                 .first()
             )
         else:
-            available_leave = AvailableLeave(
-                leave_type_id=leave_allocation_request.leave_type_id,
-                employee_id=employee,
+            available_leave = prepare_new_balance(
+                AvailableLeave(
+                    leave_type_id=leave_allocation_request.leave_type_id,
+                    employee_id=employee,
+                )
             )
         available_leave.available_days += leave_allocation_request.requested_days
         available_leave.save()
