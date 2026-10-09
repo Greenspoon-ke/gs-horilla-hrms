@@ -5,6 +5,9 @@
 #   ticked. It asks the server to deploy exactly the commit that was tested;
 #   the server refuses anything else (see deploy/hrms-deploy.sh).
 # - The SSH key may only run the server's deploy script, nothing else.
+# - The repository is public, so these logs are public: they hold status lines
+#   only. Full details stay on the server (~/logs/deploy.log and
+#   ~/logs/deploy-history.log; see deploy/README.md).
 #
 # One-time setup: deploy/README.md.
 
@@ -28,6 +31,11 @@ on:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    # bash -eo pipefail: a failing command fails the step even inside a pipe.
+    shell: bash
 
 concurrency:
   group: production-deploy
@@ -84,8 +92,33 @@ jobs:
 
       # --keepdb: background threads keep the test database open, so dropping
       # it at the end fails; the container is thrown away anyway.
+      # -v 2 lists every test by name with its result.
       - name: Run the tests
-        run: python manage.py test leave --noinput --keepdb
+        run: python manage.py test leave --noinput --keepdb -v 2 2>&1 | tee test-output.log
+
+      - name: Summary
+        if: always()
+        run: |
+          log=test-output.log
+          ran="$( [ -f $log ] && grep -E '^Ran [0-9]+ tests' $log | tail -1 || true)"
+          outcome="$( [ -f $log ] && grep -E '^(OK|FAILED)' $log | tail -1 || true)"
+          {
+            echo "### Tests"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`$GITHUB_REF_NAME\` |"
+            echo "| Commit | \`${GITHUB_SHA:0:8}\` |"
+            echo "| Started by | $GITHUB_ACTOR |"
+            echo "| Result | ${outcome:-did not finish (see the step that failed)} |"
+            echo "| Tests | ${ran:--} |"
+            if [ -f $log ] && grep -qE '^(FAIL|ERROR): ' $log; then
+              echo
+              echo "**Failing tests**"
+              echo '```'
+              grep -E '^(FAIL|ERROR): ' $log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     name: Deploy to production
@@ -113,9 +146,39 @@ jobs:
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # The server marks each step with "==> name"; show each as a
+          # collapsible section in this log, and keep its RESULT line visible.
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
             -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
-            "ubuntu@$HOST" "deploy sha=$GITHUB_SHA backup=$BACKUP migrate=$migrate"
+            "ubuntu@$HOST" \
+            "deploy sha=$GITHUB_SHA backup=$BACKUP migrate=$migrate run=$GITHUB_RUN_ID actor=$GITHUB_ACTOR" \
+            | tee deploy-output.log \
+            | sed -u -E -e 's/^([0-9:]{8}) ==> (.*)$/::endgroup::\n::group::\1 \2/' \
+                        -e 's/^([0-9:]{8} RESULT: .*)$/::endgroup::\n\1/'
+
+      - name: Summary
+        if: always()
+        env:
+          BACKUP: ${{ inputs.backup && 'yes' || 'no' }}
+          MIGRATE_APPS: ${{ inputs.migrate_apps }}
+        run: |
+          result="$( [ -f deploy-output.log ] && grep -E 'RESULT: ' deploy-output.log | tail -1 | sed -E 's/^[0-9:]{8} RESULT: //' || true)"
+          {
+            echo "### Deploy"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA:0:8}\` |"
+            echo "| Started by | $GITHUB_ACTOR |"
+            echo "| Backup | $BACKUP |"
+            echo "| Migrations | ${MIGRATE_APPS:-none} |"
+            echo "| Result | ${result:-no answer from the server (SSH failed?)} |"
+            echo
+            echo "Server details: \`~/logs/deploy.log\` and \`~/logs/deploy-history.log\` (run $GITHUB_RUN_ID)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$result" in
+            DEPLOYED* | "UP TO DATE"*) ;;
+            *) echo "::error title=Deploy did not complete::${result:-no answer from the server}" ;;
+          esac
 
       - name: Remove the key
         if: always()

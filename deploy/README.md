@@ -23,7 +23,36 @@ The server side is `deploy/hrms-deploy.sh`, installed as `/home/ubuntu/bin/hrms-
 4. **Restarts** gunicorn, then checks two things: no new errors in its log, and the login page answers.
 5. **On failure after the pull,** if no migration has run, it puts the previous commit back and restarts. After a migration it stops and reports instead, so a person decides.
 
-Each run is logged to `/home/ubuntu/logs/deploy.log` on the server.
+## Where to find the logs
+
+**On GitHub (public, because the repo is public):**
+- **Run page summary:**
+  - **Tests:** branch, commit, who started the run, and the result, with any failing tests listed.
+  - **Deploy:** the commit, backup, migrations and the server's result.
+- **Step log:**
+  - **Tests:** every test by name, with its result.
+  - **Deploy:** one collapsible section per server step, each with timings, and the `RESULT:` line underneath.
+- **Error banner:** a deploy that was refused, rolled back or failed shows a red banner at the top of the run.
+- **Never in the GitHub log:** error tracebacks from the server. They can contain employee data, so the GitHub log only counts them.
+
+**On the server (private):**
+
+| Log | Contents | Command |
+|---|---|---|
+| `~/logs/deploy-history.log` | One line per deploy: time, result, from → to commit, backup file, migrations, who, GitHub run number, duration, reason | `cat ~/logs/deploy-history.log` |
+| `~/logs/deploy.log` | Every line of every deploy, timestamped (UTC); the last 5000 lines are kept | `tail -n 80 ~/logs/deploy.log` |
+| gunicorn | Application errors, including those counted by the health check | `sudo journalctl -u gunicorn --since "1 hour ago"` |
+| `~/logs/accrue_leave.log` | The daily 06:00 (Nairobi) Annual Leave accrual | `tail -n 20 ~/logs/accrue_leave.log` |
+
+**Possible results:**
+
+| Result | Meaning |
+|---|---|
+| `DEPLOYED` | The new code is live and the health check passed. |
+| `UP TO DATE` | Nothing new to deploy. |
+| `REFUSED` | Nothing was changed. The reason is given: local changes, a commit merged since the tests ran, or the accrual job running. |
+| `ROLLED BACK` | A step failed after the pull. The previous code is back and gunicorn has restarted. |
+| `FAILED` | Failed before the pull (nothing changed), or during a migration. After a migration nothing is undone automatically: use the backup named in the log and decide by hand.
 
 ## One-time setup
 1. **Create a deploy key on your Mac.** Never use the EC2 `.pem` key for this.
