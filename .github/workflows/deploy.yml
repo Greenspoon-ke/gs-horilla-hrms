@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   test:
-    name: Leave tests
+    name: Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
@@ -84,7 +84,7 @@ jobs:
 
       # --keepdb: background threads keep the test database open, so dropping
       # it at the end fails; the container is thrown away anyway.
-      - name: Run the leave tests
+      - name: Run the tests
         run: python manage.py test leave --noinput --keepdb
 
   deploy:
