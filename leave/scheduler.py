@@ -5,9 +5,31 @@ from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dateutil.relativedelta import relativedelta
+from django.db import connections
+
+
+def close_stale_connections():
+    """
+    Background threads never get Django's per-request connection cleanup, so a
+    connection the database dropped (e.g. PostgreSQL restarted by automatic
+    updates) would fail every later run. Same as close_old_connections, except
+    that a connection inside a transaction is never touched.
+    """
+    for connection in connections.all(initialized_only=True):
+        if not connection.in_atomic_block:
+            connection.close_if_unusable_or_obsolete()
 
 
 def leave_reset():
+    """Runs every 20 s in a background thread of each web process."""
+    close_stale_connections()
+    try:
+        _reset_balances()
+    finally:
+        close_stale_connections()
+
+
+def _reset_balances():
     # Imported here: this module loads from leave/__init__.py, before models.
     from leave.accrual import ACCRUAL_LEAVE_TYPE_NAME
     from leave.models import LeaveType
