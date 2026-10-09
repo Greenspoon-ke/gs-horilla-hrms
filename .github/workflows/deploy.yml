@@ -1,0 +1,122 @@
+# Test and deploy, started by hand from the Actions tab ("Run workflow").
+#
+# - Tests run on whichever branch is chosen in "Use workflow from".
+# - Deploy runs only when that branch is 1.0, the tests passed and "deploy" is
+#   ticked. It asks the server to deploy exactly the commit that was tested;
+#   the server refuses anything else (see deploy/hrms-deploy.sh).
+# - The SSH key may only run the server's deploy script, nothing else.
+#
+# One-time setup: deploy/README.md.
+
+name: Test and deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy to production after the tests pass (1.0 only; untick for tests only)"
+        type: boolean
+        default: true
+      backup:
+        description: "Back up the production database to S3 first"
+        type: boolean
+        default: true
+      migrate_apps:
+        description: "Apps to migrate, comma-separated (e.g. leave). Empty means none"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Leave tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: horilla
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: horilla_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U horilla"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Throwaway values for the test database only; nothing here is secret.
+      DJANGO_SETTINGS_MODULE: horilla.settings_test
+      SECRET_KEY: ci-only-not-secret
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost
+      CSRF_TRUSTED_ORIGINS: http://localhost
+      TIME_ZONE: Africa/Nairobi
+      DB_ENGINE: django.db.backends.postgresql
+      DB_NAME: horilla_ci
+      DB_USER: horilla
+      DB_PASSWORD: ci-only-password
+      DB_HOST: localhost
+      DB_PORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # sentry-sdk: settings.py imports it but requirements.txt does not list
+      # it yet (added on feat/sentry-dsn-from-env).
+      - name: Install dependencies
+        run: pip install -r requirements.txt sentry-sdk==2.38.0
+
+      # Migrations are git-ignored, so build the tables from the models. Some
+      # apps read their tables at start-up, so the main database needs them too.
+      - name: Create tables
+        run: python manage.py migrate --run-syncdb --noinput
+
+      # --keepdb: background threads keep the test database open, so dropping
+      # it at the end fails; the container is thrown away anyway.
+      - name: Run the leave tests
+        run: python manage.py test leave --noinput --keepdb
+
+  deploy:
+    name: Deploy to production
+    needs: test
+    if: ${{ inputs.deploy && github.ref == 'refs/heads/1.0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Deploy the tested commit
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          BACKUP: ${{ inputs.backup && 'yes' || 'no' }}
+          MIGRATE_APPS: ${{ inputs.migrate_apps }}
+        run: |
+          migrate="${MIGRATE_APPS// /}"
+          migrate="${migrate:-none}"
+          if [[ ! "$migrate" =~ ^(none|[a-z_]+(,[a-z_]+)*)$ ]]; then
+            echo "migrate_apps must be app labels separated by commas, e.g. leave"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 \
+            "ubuntu@$HOST" "deploy sha=$GITHUB_SHA backup=$BACKUP migrate=$migrate"
+
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
