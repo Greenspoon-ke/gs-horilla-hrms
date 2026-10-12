@@ -73,9 +73,12 @@ jobs:
       DB_HOST: localhost
       DB_PORT: "5432"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          # Nothing here pushes, so do not leave the token in .git/config.
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -128,6 +131,33 @@ jobs:
     timeout-minutes: 30
     environment: production
     steps:
+      # Fail early with a clear message instead of an SSH error. Values are
+      # checked for shape only and never printed.
+      - name: Check the deploy settings
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          where="Settings > Environments > production > Environment secrets"
+          missing=()
+          [ -n "$SSH_KEY" ] || missing+=(DEPLOY_SSH_KEY)
+          [ -n "$KNOWN_HOSTS" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          [ -n "$HOST" ] || missing+=(DEPLOY_HOST)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error title=Deploy settings missing::Not set: ${missing[*]} ($where)"
+            exit 1
+          fi
+          if [[ "$SSH_KEY" != *"BEGIN OPENSSH PRIVATE KEY"* ]]; then
+            echo "::error title=Deploy settings::DEPLOY_SSH_KEY is not an OpenSSH private key ($where)"
+            exit 1
+          fi
+          if [[ "$KNOWN_HOSTS" != "$HOST "* ]]; then
+            echo "::error title=Deploy settings::DEPLOY_KNOWN_HOSTS must be the line for DEPLOY_HOST, '<host> ssh-ed25519 AAAA...' ($where)"
+            exit 1
+          fi
+          echo "Deploy settings present."
+
       - name: Deploy the tested commit
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

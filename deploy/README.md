@@ -86,6 +86,8 @@ The server side is `deploy/hrms-deploy.sh`, installed as `/home/ubuntu/bin/hrms-
      - `DEPLOY_KNOWN_HOSTS`: the line from step 2;
      - `DEPLOY_HOST`: the server's address.
 
+   If one is missing, misnamed or pasted into the wrong place, the run stops at **Check the deploy settings** and names it. It never connects with incomplete settings.
+
 ## Running the tests locally the same way
 
 ```
