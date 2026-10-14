@@ -208,6 +208,36 @@ class ConversionTests(TestCase):
         )
         self.assertEqual(LeaveRequest.objects.count(), 1)
 
+    def test_hr_status_and_dates_replace_the_allocations_own(self):
+        # A week the manager rejected, but HR's rota confirms was taken.
+        refused = self.allocation(7, self.at(2026, 7, 30), status="rejected", reason="no")
+        self.convert(apply=True)
+        self.assertEqual(self.converted(refused).status, "rejected")
+        path = Path(self.out_dir) / "decisions.csv"
+        path.write_text(
+            "alloc_id,keep_drop,start_date,end_date,status\n"
+            f"{refused.pk},,2026-07-20,2026-07-26,approved\n"
+        )
+        self.convert("--decisions", str(path), apply=True)
+        leave_request = self.converted(refused)
+        # Mon-Sun is 5 working days: weekends are company leave.
+        self.assertEqual(
+            (leave_request.status, leave_request.start_date, leave_request.requested_days),
+            ("approved", date(2026, 7, 20), 5),
+        )
+        self.assertEqual(
+            (leave_request.approved_available_days, leave_request.approved_carryforward_days),
+            (0, 0),
+        )
+        self.assertEqual(self.changes(self.convert("--decisions", str(path))), 0)
+        mapping = sorted(Path(self.out_dir).glob("*-mapping.csv"))[0]
+        call_command(
+            "convert_leave_allocations", "--reverse", "--mapping", str(mapping),
+            "--apply", "--confirm-rows", "1", stdout=StringIO(),
+        )
+        refused.refresh_from_db()
+        self.assertEqual((refused.status, refused.reject_reason), ("rejected", "no"))
+
     def test_reverse_restores_everything(self):
         approved = self.allocation(5, self.at(2026, 7, 29))
         refused = self.allocation(2, self.at(2026, 8, 3), status="rejected", reason="no")

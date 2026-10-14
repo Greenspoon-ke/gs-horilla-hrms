@@ -53,6 +53,7 @@ class HorillaAutomationConfig(AppConfig):
                 # write (horilla_automations would otherwise connect here).
                 "convert_leave_allocations",
                 "leave_cleanup_setup",
+                "record_hr_leave",
             ]
         ):
             from horilla_automations.signals import start_automation

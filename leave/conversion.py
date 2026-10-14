@@ -6,7 +6,9 @@ request it should have been.
 
 Rules:
 
-- Each allocation becomes a leave request with the same status: approved
+- Each allocation becomes a leave request with the same status (HR can set
+  another one in the decisions file, e.g. a week a manager rejected but HR's
+  rota confirms was taken): approved
   counts as days taken in the Annual Leave rebuild, requested waits for its
   manager, rejected stays rejected. Nothing is deducted here and no mail or
   notification is sent: the rebuild is the only thing that counts the days.
@@ -49,6 +51,7 @@ from leave.methods import calculate_requested_days
 from leave.models import AvailableLeave, LeaveAllocationRequest, LeaveRequest
 
 MARK = "(leave clean-up 2026)"
+STATUSES = ("approved", "requested", "rejected")
 CONVERTED = "Converted to leave request #"
 DUPLICATE_WINDOW = timedelta(days=7)
 DESCRIPTION_LIMIT = 255  # the leave request form's limit
@@ -61,6 +64,7 @@ REPORT_COLUMNS = [
     "employee_id",
     "leave_type",
     "original_status",
+    "status",
     "days",
     "created",
     "action",
@@ -225,7 +229,10 @@ def parse_day(value, name, line):
 
 
 def read_decisions(raw_path, known_ids):
-    """HR's CSV: alloc_id,keep_drop,start_date,end_date (blank = default)."""
+    """
+    HR's CSV: alloc_id,keep_drop,start_date,end_date[,status] (blank = default).
+    status (approved, requested or rejected) replaces the allocation's own.
+    """
     if not raw_path:
         return {}
     path = outside_repo(raw_path)
@@ -259,7 +266,17 @@ def read_decisions(raw_path, known_ids):
                 raise ConversionRefused(f"decisions line {line}: end_date needs start_date")
             if start and end and end < start:
                 raise ConversionRefused(f"decisions line {line}: end_date before start_date")
-            decisions[alloc_id] = {"keep_drop": keep_drop, "start": start, "end": end}
+            status = record.get("status", "").lower()
+            if status not in ("", *STATUSES):
+                raise ConversionRefused(
+                    f"decisions line {line}: status is one of {', '.join(STATUSES)}"
+                )
+            decisions[alloc_id] = {
+                "keep_drop": keep_drop,
+                "start": start,
+                "end": end,
+                "status": status,
+            }
     return decisions
 
 
@@ -273,6 +290,7 @@ class Plan:
     leave_type: str
     original_status: str
     original_reason: str
+    status: str
     days: float
     created: date
     keep: bool
@@ -283,11 +301,18 @@ class Plan:
     end_breakdown: str = "full_day"
     computed_days: float = None
     leave_request_id: int = None
-    action: str = "none"  # create | redate | mark | unconvert | drop | none
+    action: str = "none"  # create | update | mark | unconvert | drop | none
     flags: list = field(default_factory=list)
 
     def key(self):
-        return (self.action, self.start, self.end, self.start_breakdown, self.end_breakdown)
+        return (
+            self.action,
+            self.status,
+            self.start,
+            self.end,
+            self.start_breakdown,
+            self.end_breakdown,
+        )
 
     def report_row(self):
         return [
@@ -296,6 +321,7 @@ class Plan:
             self.employee_id,
             self.leave_type,
             self.original_status,
+            self.status,
             self.days,
             self.created,
             self.action,
@@ -338,6 +364,7 @@ def plan_allocation(allocation, duplicate_of, decision):
         leave_type=leave_type.name,
         original_status=status,
         original_reason=reason,
+        status=status,
         days=allocation.requested_days,
         created=created_day(allocation),
         keep=keep,
@@ -345,7 +372,7 @@ def plan_allocation(allocation, duplicate_of, decision):
     )
     if duplicate_of is not None:
         plan.flags.append("DUPLICATE")
-    if decision and (decision["keep_drop"] or decision["start"]):
+    if decision and (decision["keep_drop"] or decision["start"] or decision["status"]):
         plan.flags.append("HR_DECISION")
     if not employee.is_active:
         plan.flags.append("EMP_INACTIVE")
@@ -358,6 +385,11 @@ def plan_allocation(allocation, duplicate_of, decision):
 
     existing = converted_request(allocation)
     plan.leave_request_id = existing.pk if existing else None
+    # Like the dates: HR's decision wins, else keep what an earlier run set.
+    if decision and decision["status"]:
+        plan.status = decision["status"]
+    elif existing:
+        plan.status = existing.status
     reason_now = allocation.reject_reason or ""
     marked_converted = CONVERTED in reason_now and MARK in reason_now
     marked_dropped = MARK in reason_now and not marked_converted
@@ -417,15 +449,16 @@ def plan_allocation(allocation, duplicate_of, decision):
     if not existing:
         plan.action = "create"
     elif (
+        existing.status,
         existing.start_date,
         existing.end_date,
         existing.start_date_breakdown,
         existing.end_date_breakdown,
-    ) != (plan.start, plan.end, plan.start_breakdown, plan.end_breakdown):
-        plan.action = "redate"
+    ) != (plan.status, plan.start, plan.end, plan.start_breakdown, plan.end_breakdown):
+        plan.action = "update"
     elif not (marked_converted and allocation.status == "rejected"):
         plan.action = "mark"
-    if plan.action == "redate" and deducted(existing):
+    if plan.action == "update" and deducted(existing):
         raise ConversionRefused(
             f"Allocation {allocation.pk}: leave request #{existing.pk} was approved "
             "with days deducted since; change it in the UI instead."
@@ -479,6 +512,7 @@ def _mark(allocation, reason):
 
 
 def _save_request(leave_request, plan):
+    leave_request.status = plan.status
     leave_request.start_date = plan.start
     leave_request.end_date = plan.end
     leave_request.start_date_breakdown = plan.start_breakdown
@@ -503,7 +537,6 @@ def _execute(allocation, plan):
             description=(marker(plan.alloc_id) + allocation.description)[
                 :DESCRIPTION_LIMIT
             ],
-            status=plan.original_status,
             requested_date=allocation.requested_date,
             attachment=allocation.attachment.name or None,
             created_by=creator,
@@ -511,7 +544,7 @@ def _execute(allocation, plan):
         _save_request(leave_request, plan)
         plan.leave_request_id = leave_request.pk
         _mark(allocation, f"{CONVERTED}{leave_request.pk} {MARK}{suffix}")
-    elif plan.action == "redate":
+    elif plan.action == "update":
         _save_request(LeaveRequest._base_manager.get(pk=plan.leave_request_id), plan)
     elif plan.action == "mark":
         _mark(allocation, f"{CONVERTED}{plan.leave_request_id} {MARK}{suffix}")
