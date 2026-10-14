@@ -39,9 +39,9 @@ def _reset_balances():
     leave_types = LeaveType.objects.filter(reset=True)
     # Looping through filtered leave types with reset is true
     for leave_type in leave_types:
-        # Annual Leave carry forward never expires (HR decision D5'). Its type
-        # is "carryforward expire", and the expiry below zeroes the carry and
-        # refills 24 days, so it is switched off for that type only.
+        # Annual Leave is reset=False since the 2026 leave clean-up, so it is
+        # not in this loop. If it is ever switched back on, keep the expiry
+        # off for it: the expiry zeroes the carry and refills 24 days.
         expiry_enabled = leave_type.name != ACCRUAL_LEAVE_TYPE_NAME
         # Looping through all available leaves
         available_leaves = leave_type.employee_available_leave.all()
@@ -82,8 +82,8 @@ def _reset_balances():
 if not any(
     cmd in sys.argv
     # "test": the 20s job would otherwise mutate rows while tests run.
-    # "accrue_leave": keep that command the only writer of leave balances
-    # while it runs.
+    # "accrue_leave", "convert_leave_allocations", "leave_cleanup_setup": keep
+    # each the only writer of leave data while it runs.
     for cmd in [
         "makemigrations",
         "migrate",
@@ -92,6 +92,8 @@ if not any(
         "shell",
         "test",
         "accrue_leave",
+        "convert_leave_allocations",
+        "leave_cleanup_setup",
     ]
 ):
     """

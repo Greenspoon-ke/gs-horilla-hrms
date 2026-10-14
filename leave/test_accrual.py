@@ -7,22 +7,23 @@ Synthetic data only. The test runner never touches the real database.
 
 import shutil
 import tempfile
-from datetime import date
+from datetime import date, datetime
 
 from django.conf import settings
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from employee.models import Employee, EmployeeWorkInformation
 from horilla.horilla_middlewares import _thread_locals
 from leave.accrual import (
+    NAIROBI,
     AccrualRefused,
     accrual_start,
     prepare_new_balance,
     run_daily,
     run_rebuild,
 )
-from leave.models import AvailableLeave, LeaveRequest, LeaveType
+from leave.models import AvailableLeave, LeaveAllocationRequest, LeaveRequest, LeaveType
 from leave.scheduler import leave_reset
 from leave.tests import add_missing_user_column, make_employee
 
@@ -41,19 +42,13 @@ class AccrualTestCase(TestCase):
         self.addCleanup(setattr, _thread_locals, "request", None)
         self.out_dir = tempfile.mkdtemp(prefix="accrual-test-")
         self.addCleanup(shutil.rmtree, self.out_dir, ignore_errors=True)
-        # Annual Leave as configured in production.
+        # Annual Leave as configured in production after the 2026 leave
+        # clean-up (leave_cleanup_setup): no yearly reset, no carry-forward.
         self.annual = LeaveType.objects.create(
             name="Annual Leave",
             total_days=24,
-            reset=True,
-            reset_based="yearly",
-            reset_month="1",
-            reset_day="1",
-            carryforward_type="carryforward expire",
-            carryforward_max=10,
-            carryforward_expire_in=6,
-            carryforward_expire_period="month",
-            carryforward_expire_date=date(2027, 3, 16),
+            reset=False,
+            carryforward_type="no carryforward",
         )
 
     def employee(self, code, joined, active=True):
@@ -141,31 +136,34 @@ class DailyAccrualTests(AccrualTestCase):
         # June to September: 4 months of 2 days.
         self.assertEqual(self.values(row), (11, 0, date(2026, 10, 1)))
 
-    def test_year_end_carries_at_most_10(self):
+    def test_year_end_carries_nothing(self):
         row = self.balance(
             self.employee("GSL001", date(2026, 1, 5)), 15, 0, marker=date(2026, 12, 1)
         )
         self.daily(date(2027, 1, 3))
         row.refresh_from_db()
-        # December's 2 days are credited first: 17 left, 10 carried, 7 lapse.
-        self.assertEqual((row.available_days, row.carryforward_days), (0, 10))
+        # December's 2 days are credited first, then all 17 lapse (cap 0).
+        self.assertEqual((row.available_days, row.carryforward_days), (0, 0))
         self.assertEqual(row.last_accrual_date, date(2027, 1, 1))
         self.assertEqual(row.reset_date, date(2028, 1, 1))
 
-    def test_year_end_carries_a_balance_below_the_cap_in_full(self):
+    def test_new_year_starts_from_zero(self):
         row = self.balance(
             self.employee("GSL001", date(2026, 1, 5)), 4, 0, marker=date(2026, 12, 1)
         )
-        self.daily(date(2027, 2, 1))  # December and January
-        self.assertEqual(self.values(row), (2, 6, date(2027, 2, 1)))
+        self.daily(date(2027, 2, 1))  # December, then January of the new year
+        self.assertEqual(self.values(row), (2, 0, date(2027, 2, 1)))
 
-    def test_negative_balance_is_recorded_at_year_end(self):
+    def test_negative_balance_carries_into_the_new_year_as_debt(self):
+        # HR decision Q3: no write-off at year end.
         row = self.balance(
             self.employee("GSL001", date(2026, 1, 5)), -5, 0, marker=date(2026, 12, 1)
         )
         result = self.daily(date(2027, 1, 2))
         self.assertEqual(self.values(row), (-3, 0, date(2027, 1, 1)))
         self.assertIn("NEGATIVE", result["plans"][0].flags)
+        self.daily(date(2027, 2, 1))  # January is earned against the debt
+        self.assertEqual(self.values(row), (-1, 0, date(2027, 2, 1)))
 
     def test_second_run_credits_nothing(self):
         row = self.balance(
@@ -303,16 +301,87 @@ class RebuildTests(AccrualTestCase):
 
     def test_refuses_when_annual_leave_settings_change(self):
         self.balance(self.employee("GSL001", date(2026, 6, 1)))
-        for field, value in [("total_days", 21), ("carryforward_max", 5)]:
-            with self.subTest(field=field):
+        for field, value in [
+            ("total_days", 21),
+            ("carryforward_type", "carryforward"),
+            ("carryforward_type", "carryforward expire"),
+        ]:
+            with self.subTest(field=field, value=value):
                 LeaveType.objects.filter(pk=self.annual.pk).update(**{field: value})
                 with self.assertRaises(AccrualRefused):
                     self.rebuild({"GSL001": date(2026, 6, 1)})
                 with self.assertRaises(AccrualRefused):
                     self.daily(TODAY)
                 LeaveType.objects.filter(pk=self.annual.pk).update(
-                    total_days=24, carryforward_max=10
+                    total_days=24, carryforward_type="no carryforward"
                 )
+
+    def test_opening_carry_is_refused_now_the_cap_is_0(self):
+        row = self.balance(self.employee("GSL001", date(2021, 6, 1)))
+        result = self.rebuild({"GSL999": date(2026, 6, 1)}, opening_carry={"GSL001": 2})
+        self.assertEqual(result["plans"][0].action, "refuse")
+        self.assertEqual(self.values(row), (24, 0, None))
+
+
+@override_settings(LEAVE_ALLOCATION_CUTOVER="2026-10-01")
+class AllocationGrantTests(AccrualTestCase):
+    """Manager/HR grants after the cut-over survive the rebuild and daily run."""
+
+    def setUp(self):
+        super().setUp()
+        self.person = self.employee("GSL001", date(2026, 6, 1))
+        self.row = self.balance(self.person)
+
+    def allocation(self, days, created, status="approved"):
+        allocation = LeaveAllocationRequest.objects.create(
+            employee_id=self.person,
+            leave_type_id=self.annual,
+            requested_days=days,
+            description="synthetic",
+            status=status,
+        )
+        # created_at is auto_now_add: set the creation time explicitly.
+        LeaveAllocationRequest.objects.filter(pk=allocation.pk).update(
+            created_at=datetime(created.year, created.month, created.day, 9, tzinfo=NAIROBI)
+        )
+        return allocation
+
+    def test_post_cutover_grant_survives_rebuild_and_daily_run(self):
+        self.allocation(3, date(2026, 10, 2))
+        result = self.apply_rebuild({"GSL001": date(2026, 6, 1)})
+        self.assertEqual(result["plans"][0].allocated, 3)
+        self.assertEqual(self.values(self.row), (11, 0, date(2026, 10, 1)))  # 8 + 3
+        latest = self.row.history_set.order_by("-history_date").first()
+        self.assertIn("3 granted", latest.history_change_reason)
+        # A second rebuild keeps the grant and changes nothing.
+        again = self.rebuild({"GSL001": date(2026, 6, 1)})
+        self.assertEqual([plan.action for plan in again["plans"]], ["unchanged"])
+        self.daily(date(2026, 11, 1))
+        self.assertEqual(self.values(self.row), (13, 0, date(2026, 11, 1)))
+        # A later rebuild through October agrees with the daily run.
+        later = run_rebuild(
+            date(2026, 10, 31),
+            {"GSL001": date(2026, 6, 1)},
+            out_dir=self.out_dir,
+            today=date(2026, 11, 2),
+        )
+        self.assertEqual([plan.action for plan in later["plans"]], ["unchanged"])
+
+    def test_converted_and_pre_cutover_allocations_never_count(self):
+        # Converted allocations are marked rejected; earlier approved ones are
+        # converted into leave requests, so they must not be granted as well.
+        self.allocation(7, date(2026, 10, 3), status="rejected")
+        self.allocation(5, date(2026, 9, 30))
+        self.allocation(4, date(2026, 10, 3), status="requested")
+        result = self.apply_rebuild({"GSL001": date(2026, 6, 1)})
+        self.assertEqual(result["plans"][0].allocated, 0)
+        self.assertEqual(self.values(self.row), (8, 0, date(2026, 10, 1)))
+
+    @override_settings(LEAVE_ALLOCATION_CUTOVER="15/10/2026")
+    def test_bad_cutover_setting_refuses_the_rebuild(self):
+        with self.assertRaises(AccrualRefused):
+            self.rebuild({"GSL001": date(2026, 6, 1)})
+        self.assertEqual(self.values(self.row), (24, 0, None))
 
 
 class NewBalanceTests(AccrualTestCase):
@@ -371,6 +440,16 @@ class NewBalanceTests(AccrualTestCase):
 
 
 class ResetJobTests(AccrualTestCase):
+    def test_reset_false_annual_leave_is_never_touched(self):
+        # Rows not on accrual used to be refilled to 24 on their reset date.
+        today = date.today()
+        row = self.balance(self.employee("GSL001", date(2021, 6, 1)), -2, 0)
+        AvailableLeave.objects.filter(pk=row.pk).update(
+            reset_date=today, expired_date=today
+        )
+        leave_reset()
+        self.assertEqual(self.values(row), (-2, 0, None))
+
     def test_reset_and_expiry_skip_accrual_rows(self):
         today = date.today()
         row = self.balance(

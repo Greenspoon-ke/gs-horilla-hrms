@@ -234,7 +234,8 @@ USE_L10N = True
 USE_TZ = True
 
 # Annual Leave carry-over rules (leave/accrual.py). All off by default.
-# Department names (comma-separated) exempt from the 10-day year-end cap.
+# Department names (comma-separated) exempt from the year-end carry cap
+# (0 days since the 2026 leave clean-up: nothing carries forward).
 LEAVE_CARRY_EXEMPT_DEPARTMENTS = env.list("LEAVE_CARRY_EXEMPT_DEPARTMENTS", default=[])
 # Cap for those departments; empty means no limit.
 LEAVE_CARRY_EXEMPT_CAP = env("LEAVE_CARRY_EXEMPT_CAP", default="")
@@ -244,6 +245,10 @@ LEAVE_CARRY_EXPIRES_30_JUNE = env.bool("LEAVE_CARRY_EXPIRES_30_JUNE", default=Fa
 LEAVE_CARRY_EXEMPT_SKIP_EXPIRY = env.bool(
     "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", default=False
 )
+# Leave allocations created from this date (Africa/Nairobi, YYYY-MM-DD) are
+# real grants: the Annual Leave rebuild adds them. Earlier ones are converted
+# into leave requests by convert_leave_allocations. Set it to the deploy date.
+LEAVE_ALLOCATION_CUTOVER = env("LEAVE_ALLOCATION_CUTOVER", default="2026-10-15")
 
 # Production settings
 if not DEBUG:

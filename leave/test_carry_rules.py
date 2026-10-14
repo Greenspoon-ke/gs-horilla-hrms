@@ -49,18 +49,18 @@ class CarryRulesTestCase(AccrualTestCase):
 
 
 class ExemptTeamCapTests(CarryRulesTestCase):
-    def test_off_by_default_everyone_is_capped_at_10(self):
+    def test_off_by_default_nobody_carries_anything(self):
         row = self.year_end_row("GSL001", self.packing, 15)
         self.daily(date(2027, 1, 2))
-        self.assertEqual(self.values(row)[1], 10)
+        self.assertEqual(self.values(row)[:2], (0, 0))
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
-    def test_exempt_team_keeps_every_day_other_teams_keep_10(self):
+    def test_exempt_team_keeps_every_day_other_teams_keep_none(self):
         packer = self.year_end_row("GSL001", self.packing, 15)
         finance = self.year_end_row("GSL002", self.finance, 15)
         self.daily(date(2027, 1, 2))
         self.assertEqual(self.values(packer), (0, 17, date(2027, 1, 1)))
-        self.assertEqual(self.values(finance), (0, 10, date(2027, 1, 1)))
+        self.assertEqual(self.values(finance), (0, 0, date(2027, 1, 1)))
 
     @override_settings(
         LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS, LEAVE_CARRY_EXEMPT_CAP="15"
@@ -85,7 +85,7 @@ class ExemptTeamCapTests(CarryRulesTestCase):
         for settings in [
             {"LEAVE_CARRY_EXEMPT_DEPARTMENTS": ["Packng"]},
             {"LEAVE_CARRY_EXEMPT_CAP": "five"},
-            {"LEAVE_CARRY_EXEMPT_CAP": "5"},
+            {"LEAVE_CARRY_EXEMPT_CAP": "-1"},
         ]:
             with self.subTest(settings=settings), override_settings(**settings):
                 with self.assertRaises(AccrualRefused):
@@ -94,6 +94,9 @@ class ExemptTeamCapTests(CarryRulesTestCase):
                     self.daily(date(2027, 1, 2))
 
 
+# Only exempt teams can hold carried days now that the standard cap is 0, so
+# the June expiry is tested on an exempt team's row.
+@override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
 class June30ExpiryTests(CarryRulesTestCase):
     def june_row(self, department):
         employee = self.in_department(
@@ -102,13 +105,13 @@ class June30ExpiryTests(CarryRulesTestCase):
         return self.balance(employee, 3, 4, marker=date(2026, 6, 1))
 
     def test_off_by_default_carry_stays(self):
-        row = self.june_row(self.finance)
+        row = self.june_row(self.packing)
         self.daily(date(2026, 7, 2))
         self.assertEqual(self.values(row), (5, 4, date(2026, 7, 1)))
 
     @override_settings(LEAVE_CARRY_EXPIRES_30_JUNE=True)
     def test_unused_carry_lapses_when_june_is_credited(self):
-        row = self.june_row(self.finance)
+        row = self.june_row(self.packing)
         result = self.daily(date(2026, 7, 2))
         self.assertEqual(self.values(row), (5, 0, date(2026, 7, 1)))
         self.assertIn("CARRY_EXPIRED", result["plans"][0].flags)
@@ -117,7 +120,7 @@ class June30ExpiryTests(CarryRulesTestCase):
 
     @override_settings(LEAVE_CARRY_EXPIRES_30_JUNE=True)
     def test_nothing_lapses_before_june_is_credited(self):
-        row = self.june_row(self.finance)
+        row = self.june_row(self.packing)
         self.daily(date(2026, 6, 30))
         self.assertEqual(self.values(row), (3, 4, date(2026, 6, 1)))
 
@@ -140,7 +143,8 @@ class BookingCapTests(CarryRulesTestCase):
         return self.balance(employee, 2, carry, marker=date(2026, 10, 1))
 
     def test_type_cap_by_default(self):
-        self.assertEqual(booking_carry_cap(self.accrual_row(self.packing, 14)), 10)
+        # "no carryforward" and cap 0: no carried day can be booked.
+        self.assertEqual(booking_carry_cap(self.accrual_row(self.packing, 14)), 0)
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
     def test_exempt_team_on_accrual_can_book_all_its_carry(self):
@@ -149,11 +153,11 @@ class BookingCapTests(CarryRulesTestCase):
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
     def test_other_teams_and_rows_off_accrual_keep_the_type_cap(self):
-        self.assertEqual(booking_carry_cap(self.accrual_row(self.finance, 4)), 10)
+        self.assertEqual(booking_carry_cap(self.accrual_row(self.finance, 4)), 0)
         employee = self.in_department(
             self.employee("GSL002", date(2025, 3, 3)), self.packing
         )
-        self.assertEqual(booking_carry_cap(self.balance(employee, 24, 3)), 10)
+        self.assertEqual(booking_carry_cap(self.balance(employee, 24, 3)), 0)
 
 
 class ApiCarryFirstTests(CarryRulesTestCase):

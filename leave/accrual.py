@@ -5,7 +5,7 @@ Rules (HR decisions D1-D8 of the accrual brief, with the D4', D5' and D7'
 revisions):
 
 - Only the leave type named exactly "Annual Leave" accrues. It must grant 24
-  days a year and cap carry forward at 10, or nothing runs.
+  days a year and be set to "no carryforward", or nothing runs.
 - A row is on accrual when ``AvailableLeave.last_accrual_date`` is set. The
   value is always the 1st of the next month to credit; null rows are never
   touched here.
@@ -13,18 +13,22 @@ revisions):
   employee joined on the 1st-19th, otherwise accrual starts the next month.
   Nothing accrues before 1 January 2026. Month M is credited on the 1st of
   M+1, using the Africa/Nairobi date whatever the server's TIME_ZONE.
-- When December is credited the leave year closes: up to 10 days carry
-  forward, the rest lapses, and the new year starts at 0. Departments listed
-  in LEAVE_CARRY_EXEMPT_DEPARTMENTS use LEAVE_CARRY_EXEMPT_CAP instead (empty:
-  no limit). With LEAVE_CARRY_EXPIRES_30_JUNE, carried days still unused when
+- When December is credited the leave year closes. Nothing carries forward
+  (HR's leave clean-up, 2026: the cap is 0): a positive balance lapses, a
+  negative one stays in available_days as debt. Departments listed in
+  LEAVE_CARRY_EXEMPT_DEPARTMENTS use LEAVE_CARRY_EXEMPT_CAP instead (empty: no
+  limit). With LEAVE_CARRY_EXPIRES_30_JUNE, carried days still unused when
   June is credited lapse (carry is spent first, so what is left is unused).
-- The one-off rebuild sets 2026 balances to opening carry + accrued - taken,
-  where taken is approved Annual Leave starting on or after 1 January 2026 and
-  is spent from carry first. HR's 2026 joiners sheet is the list of 2026
-  joiners, and its date replaces the system join date (D7'). Rows with Annual
-  Leave assigned before 2026 are pre-2026 staff even when on the sheet. Rows
-  not on the sheet wait for HR's opening carry; a null or 2026-08-05 join date
-  then needs an override.
+- The one-off rebuild sets 2026 balances to opening carry + accrued + granted
+  - taken, where taken is approved Annual Leave starting on or after
+  1 January 2026 and is spent from carry first, and granted is approved leave
+  allocations created on or after LEAVE_ALLOCATION_CUTOVER in that year (a
+  manager's or HR's extra days; earlier allocations are converted into leave
+  requests instead, so they count as taken). HR's 2026 joiners sheet is the
+  list of 2026 joiners, and its date replaces the system join date (D7'). Rows
+  with Annual Leave assigned before 2026 are pre-2026 staff even when on the
+  sheet. Rows not on the sheet wait for HR's opening carry (0 since the
+  clean-up); a null or 2026-08-05 join date then needs an override.
 - A new Annual Leave row starts at 0 with ``last_accrual_date`` at its first
   accruing month (``prepare_new_balance``), so the daily run catches it up.
 
@@ -49,11 +53,18 @@ from django.db import connection, transaction
 from django.db.models import Sum
 
 from base.models import Department
-from leave.models import AvailableLeave, LeaveRequest, LeaveType
+from leave.models import (
+    AvailableLeave,
+    LeaveAllocationRequest,
+    LeaveRequest,
+    LeaveType,
+)
 
 ACCRUAL_LEAVE_TYPE_NAME = "Annual Leave"
 REQUIRED_TOTAL_DAYS = 24
-CARRY_CAP = 10
+REQUIRED_CARRY_TYPE = "no carryforward"
+# HR's leave clean-up (2026): no carry-forward for anyone.
+CARRY_CAP = 0
 MONTHS_PER_YEAR = 12
 JOIN_CUTOFF_DAY = 20
 ACCRUAL_EPOCH = date(2026, 1, 1)
@@ -74,6 +85,7 @@ REPORT_COLUMNS = [
     "months",
     "accrued",
     "taken",
+    "allocated",
     "opening_carry",
     "current_available",
     "current_carry",
@@ -189,6 +201,7 @@ class RowPlan:
     months: int = 0
     accrued: float = 0.0
     taken: float = 0.0
+    allocated: float = 0.0
     opening_carry: float = 0.0
     proposed: tuple = None
     marker: date = None
@@ -210,6 +223,7 @@ class RowPlan:
             self.months,
             self.accrued,
             self.taken,
+            self.allocated,
             self.opening_carry,
             self.current[0],
             self.current[1],
@@ -280,15 +294,12 @@ def accrual_leave_type():
         raise AccrualRefused(
             f"total_days is {leave_type.total_days}, expected {REQUIRED_TOTAL_DAYS}."
         )
-    # "carryforward expire" is accepted (D5'): its expiry branch is disabled
-    # for this type in leave_reset, so the carry never expires.
-    if leave_type.carryforward_type not in ("carryforward", "carryforward expire"):
+    # CARRY_CAP is 0, so the type must not carry anything either: booking and
+    # the reset job would otherwise still count or create carried days.
+    if leave_type.carryforward_type != REQUIRED_CARRY_TYPE:
         raise AccrualRefused(
-            f"carryforward_type is {leave_type.carryforward_type!r}."
-        )
-    if leave_type.carryforward_max != CARRY_CAP:
-        raise AccrualRefused(
-            f"carryforward_max is {leave_type.carryforward_max}, expected {CARRY_CAP}."
+            f"carryforward_type is {leave_type.carryforward_type!r}, "
+            f"expected {REQUIRED_CARRY_TYPE!r}."
         )
     row_count = AvailableLeave._base_manager.filter(leave_type_id=leave_type).count()
     if row_count > MAX_ROWS:
@@ -315,6 +326,38 @@ def _requested_days(employee_id, leave_type, status):
         leave_type_id=leave_type,
         status=status,
         start_date__gte=ACCRUAL_EPOCH,
+    ).aggregate(total=Sum("requested_days"))["total"]
+    return round(total or 0, 3)
+
+
+def allocation_cutover():
+    """LEAVE_CARRY_* style setting; a typo refuses the run instead of guessing."""
+    raw = str(getattr(settings, "LEAVE_ALLOCATION_CUTOVER", "") or "").strip()
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise AccrualRefused(
+            "LEAVE_ALLOCATION_CUTOVER must be a date (YYYY-MM-DD)."
+        ) from None
+
+
+def nairobi_midnight(day):
+    return datetime(day.year, day.month, day.day, tzinfo=NAIROBI)
+
+
+def _allocated_days(employee_id, leave_type, year):
+    """
+    Days a manager or HR granted in ``year``: approved allocations created on
+    or after the cut-over. Earlier ones were really time off and are converted
+    into leave requests (convert_leave_allocations), so they count as taken.
+    """
+    start = max(allocation_cutover(), date(year, 1, 1))
+    total = LeaveAllocationRequest._base_manager.filter(
+        employee_id=employee_id,
+        leave_type_id=leave_type,
+        status="approved",
+        created_at__gte=nairobi_midnight(start),
+        created_at__lt=nairobi_midnight(date(year + 1, 1, 1)),
     ).aggregate(total=Sum("requested_days"))["total"]
     return round(total or 0, 3)
 
@@ -378,11 +421,13 @@ def plan_rebuild_row(
     if plan.accrued > leave_type.total_days:
         return plan.stop("refuse", "accrued above one year's entitlement")
     plan.taken = _requested_days(employee.pk, leave_type, "approved")
+    # Grants are part of the absolute value, so a rebuild never wipes them.
+    plan.allocated = _allocated_days(employee.pk, leave_type, through.year)
     plan.opening_carry = opening
 
     from_carry = min(opening, plan.taken)  # carry is spent first (approve view)
     carry = round(opening - from_carry, 3)
-    available = round(plan.accrued - (plan.taken - from_carry), 3)
+    available = round(plan.accrued + plan.allocated - (plan.taken - from_carry), 3)
     if available < 0:
         plan.flags.append("NEGATIVE")
         if negative == "zero":
@@ -393,9 +438,10 @@ def plan_rebuild_row(
     plan.proposed = (available, carry)
     # A future joiner must not be credited for months before they start.
     plan.marker = max(marker, plan.start)
+    granted = f", {plan.allocated:g} granted" if plan.allocated else ""
     plan.change_reason = (
         f"Accrual rebuild to {through.isoformat()}: {plan.months} months, "
-        f"{plan.taken:g} taken, opening carry {opening:g}"
+        f"{plan.taken:g} taken{granted}, opening carry {opening:g}"
     )[:MAX_REASON_LENGTH]
     if plan.proposed == plan.current and row.last_accrual_date == plan.marker:
         return plan  # unchanged: no save, so no history or audit rows
