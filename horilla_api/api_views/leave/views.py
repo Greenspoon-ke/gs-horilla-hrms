@@ -15,11 +15,35 @@ from base.methods import filtersubordinates
 from horilla_api.api_serializers.leave.serializers import *
 from leave.accrual import prepare_new_balance
 from leave.filters import *
-from leave.methods import filter_conditional_leave_request
+from leave.methods import (
+    approve_allocation,
+    can_act_on,
+    can_grant_directly,
+    can_use_allocations,
+    filter_conditional_leave_request,
+    notify_direct_grant,
+    revoke_allocation,
+)
 from leave.models import LeaveRequest
 from notifications.signals import notify
 
 from ...api_decorators.base.decorators import manager_permission_required
+
+FORBIDDEN = {"error": "You do not have permission to perform this action."}
+
+
+def forbidden():
+    return Response(FORBIDDEN, status=403)
+
+
+def can_target(user, employee):
+    """
+    Who an allocation may be created for: HR (the add permission) for anyone,
+    a manager for their own reportees only, never a manager for themselves.
+    """
+    return user.has_perm("leave.add_leaveallocationrequest") or can_grant_directly(
+        user, employee
+    )
 from ...api_methods.base.methods import groupby_queryset
 
 
@@ -233,14 +257,31 @@ class LeaveAllocationRequestGetCreateAPIView(APIView):
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
+        user = self.get_user(request)
+        if not can_use_allocations(user):
+            return forbidden()
         data = request.data
-        employee_id = self.get_user(request).employee_get.id
         if isinstance(data, QueryDict):
             data = data.dict()
-        data["created_by"] = employee_id
+        else:
+            data = dict(data)
+        # created_by is the user making the call, never a value from the body
+        # (it used to be set to an Employee id in a User column).
+        data.pop("created_by", None)
         serializer = LeaveAllocationRequestCreateSerializer(data=data)
         if serializer.is_valid():
-            allocation_request = serializer.save()
+            if not can_target(user, serializer.validated_data["employee_id"]):
+                return forbidden()
+            allocation_request = serializer.save(created_by=user)
+            if can_grant_directly(user, allocation_request.employee_id):
+                # HR decision 4: a manager's or HR's grant applies at once.
+                approve_allocation(allocation_request)
+                allocation_request.refresh_from_db()
+                notify_direct_grant(user.employee_get, allocation_request)
+                return Response(
+                    LeaveAllocationRequestGetSerializer(allocation_request).data,
+                    status=201,
+                )
             with contextlib.suppress(Exception):
                 notify.send(
                     request.user.employee_get,
@@ -272,17 +313,33 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
     @manager_permission_required("leave.view_leaveallocationrequest")
     def get(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
+        if not can_act_on(
+            request.user, allocation_request, "leave.view_leaveallocationrequest"
+        ):
+            return forbidden()
         serializer = LeaveAllocationRequestGetSerializer(allocation_request)
         return Response(serializer.data, status=200)
 
     @manager_permission_required("leave.change_leaveallocationrequest")
     def put(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
+        if not can_act_on(
+            request.user, allocation_request, "leave.change_leaveallocationrequest"
+        ):
+            return forbidden()
         if allocation_request.status == "requested":
             serializer = LeaveAllocationRequestSerilaizer(
                 allocation_request, data=request.data
             )
             if serializer.is_valid():
+                # Moving it to another employee needs the same scope as create.
+                if not can_target(
+                    request.user,
+                    serializer.validated_data.get(
+                        "employee_id", allocation_request.employee_id
+                    ),
+                ):
+                    return forbidden()
                 allocation_request = serializer.save()
                 return Response(
                     LeaveAllocationRequestGetSerializer(allocation_request).data,
@@ -294,6 +351,10 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
     @manager_permission_required("leave.delete_leaveallocationrequest")
     def delete(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
+        if not can_act_on(
+            request.user, allocation_request, "leave.delete_leaveallocationrequest"
+        ):
+            return forbidden()
         if allocation_request.status == "requested":
             allocation_request.delete()
             return Response(status=200)
@@ -708,6 +769,9 @@ class LeaveRequestApproveAPIView(APIView):
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
+        # Being a manager of someone is not enough: this request (S1).
+        if not can_act_on(request.user, leave_request, "leave.change_leaverequest"):
+            return forbidden()
         serializer = LeaveRequestApproveSerializer(leave_request, data=request.data)
         if serializer.is_valid():
             available_leave = serializer.validated_data.get("available_leave")
@@ -759,7 +823,10 @@ class LeaveRequestRejectAPIView(APIView):
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
-        employee_id = request.user.employee_get
+        if not can_act_on(request.user, leave_request, "leave.change_leaverequest"):
+            return forbidden()
+        # Refund the requester's balance (this used to be the approver's).
+        employee_id = leave_request.employee_id
         if leave_request.status != "rejected":
             self.leave_calculation(leave_request, employee_id)
             with contextlib.suppress(Exception):
@@ -813,26 +880,15 @@ class LeaveAllocationApproveAPIView(APIView):
         except LeaveAllocationRequest.DoesNotExist as e:
             raise serializers.ValidationError(e)
 
-    def approve_calculations(self, leave_allocation_request):
-        available_leave = AvailableLeave.objects.filter(
-            employee_id=leave_allocation_request.employee_id,
-            leave_type_id=leave_allocation_request.leave_type_id,
-        ).first() or prepare_new_balance(
-            AvailableLeave(
-                employee_id=leave_allocation_request.employee_id,
-                leave_type_id=leave_allocation_request.leave_type_id,
-            )
-        )
-        available_leave.available_days += leave_allocation_request.requested_days
-        available_leave.save()
-
     @manager_permission_required("leave.change_leaveallocationrequest")
     def put(self, request, pk):
         leave_allocation_request = self.get_leave_allocation_request(pk)
-        if leave_allocation_request.status == "requested":
-            self.approve_calculations(leave_allocation_request)
-            leave_allocation_request.status = "approved"
-            leave_allocation_request.save()
+        if not can_act_on(
+            request.user, leave_allocation_request, "leave.change_leaveallocationrequest"
+        ):
+            return forbidden()
+        # Same helper as the web view and direct grants: one way to add days.
+        if approve_allocation(leave_allocation_request):
             return Response(status=200)
         raise serializers.ValidationError("Access Denied.")
 
@@ -848,20 +904,15 @@ class LeaveAllocationRequestRejectAPIView(APIView):
 
     def reject_calculation(self, leave_allocation_request):
         if leave_allocation_request.status == "approved":
-            leave_type = leave_allocation_request.leave_type_id
-            requested_days = leave_allocation_request.requested_days
-            available_leave = AvailableLeave.objects.filter(
-                leave_type_id=leave_type,
-                employee_id=leave_allocation_request.employee_id,
-            ).first()
-            available_leave.available_days = max(
-                0, available_leave.available_days - requested_days
-            )
-            available_leave.save()
+            revoke_allocation(leave_allocation_request)
 
     @manager_permission_required("leave.change_leaveallocationrequest")
     def put(self, request, pk):
         leave_allocation_request = self.get_leave_allocation_request(pk)
+        if not can_act_on(
+            request.user, leave_allocation_request, "leave.change_leaveallocationrequest"
+        ):
+            return forbidden()
         if leave_allocation_request.status != "rejected":
             self.reject_calculation(leave_allocation_request)
             leave_allocation_request.status = "rejected"
@@ -893,7 +944,12 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request):
         leave_requests = self.get_leave_requests(request)
+        skipped = []
         for leave_request in leave_requests:
+            # Requests this user may not act on are skipped, not failed (S1).
+            if not can_act_on(request.user, leave_request, "leave.change_leaverequest"):
+                skipped.append(leave_request.id)
+                continue
             employee_id = leave_request.employee_id
             leave_type_id = leave_request.leave_type_id
             available_leave = AvailableLeave.objects.get(
@@ -906,13 +962,23 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
                 self.leave_approve_calculation(leave_request, available_leave)
                 leave_request.status = "approved"
                 leave_request.save()
-        return Response(status=200)
+        return Response({"skipped": skipped}, status=200)
 
     @manager_permission_required("leave.delete_leaverequest")
     def delete(self, request):
         leave_requests = self.get_leave_requests(request)
-        leave_requests.delete()
-        return Response(status=200)
+        allowed = [
+            leave_request.id
+            for leave_request in leave_requests
+            if can_act_on(request.user, leave_request, "leave.delete_leaverequest")
+        ]
+        skipped = [
+            leave_request.id
+            for leave_request in leave_requests
+            if leave_request.id not in allowed
+        ]
+        leave_requests.filter(id__in=allowed).delete()
+        return Response({"skipped": skipped}, status=200)
 
 
 class EmployeeLeaveAllocationGetCreateAPIView(APIView):
@@ -940,59 +1006,20 @@ class EmployeeLeaveAllocationGetCreateAPIView(APIView):
         return paginator.get_paginated_response(serializer.data)
 
     def post(self, request):
-        data = request.data
-        employee_id = self.get_user(request).employee_get.id
-        if isinstance(data, QueryDict):
-            data = data.dict()
-        data["employee_id"] = employee_id
-        data["created_by"] = employee_id
-        serializer = LeaveAllocationRequestCreateSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(status=200)
-        return Response(serializer.errors, status=400)
+        # HR decision Q4: staff no longer request allocations; time off is a
+        # leave request, extra days come from a manager or HR.
+        return forbidden()
 
 
 class EmployeeLeaveAllocationUpdateDeleteAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get_allocation_request(self, request, pk):
-        user = request.user
-        if isinstance(user, AnonymousUser):
-            raise Http404("AnonymousUser")
-        try:
-            allocation_request = LeaveAllocationRequest.objects.get(id=pk)
-            if allocation_request.employee_id == user.employee_get:
-                return allocation_request
-        except LeaveAllocationRequest.DoesNotExist as e:
-            raise serializers.ValidationError(e)
-
+    # HR decision Q4: staff self-service edits and deletes are removed too.
     def put(self, request, pk):
-        allocation_request = self.get_allocation_request(request, pk)
-        if allocation_request.status == "requested":
-            data = request.data
-            employee_id = request.user.employee_get.id
-            if isinstance(data, QueryDict):
-                data = data.dict()
-            data["employee_id"] = employee_id
-            data["created_by"] = employee_id
-            serializer = LeaveAllocationRequestSerilaizer(allocation_request, data=data)
-            if serializer.is_valid():
-                allocation_request = serializer.save()
-                return Response(
-                    LeaveAllocationRequestGetSerializer(allocation_request).data,
-                    status=201,
-                )
-            return Response(serializer.errors, status=400)
-        raise serializers.ValidationError({"error": "Access Denied.."})
-        return Response(status=200)
+        return forbidden()
 
     def delete(self, request, pk):
-        allocation_request = self.get_allocation_request(request, pk)
-        if allocation_request.status == "requested":
-            allocation_request.delete()
-            return Response(status=200)
-        raise serializers.ValidationError({"error": "Access Denied.."})
+        return forbidden()
 
 
 class LeaveRequestedApprovedCountAPIView(APIView):

@@ -56,11 +56,16 @@ from leave.decorators import *
 from leave.filters import *
 from leave.forms import *
 from leave.methods import (
+    approve_allocation,
     attendance_days,
     calculate_requested_days,
+    can_act_on,
+    can_grant_directly,
     company_leave_dates_list,
     filter_conditional_leave_request,
     holiday_dates_list,
+    notify_direct_grant,
+    revoke_allocation,
 )
 from leave.models import *
 from leave.models import leave_requested_dates
@@ -997,6 +1002,16 @@ def leave_request_approve(request, id, emp_id=None):
           Otherwise, it returns to the default leave request view template.
     """
     leave_request = LeaveRequest.objects.get(id=id)
+    # manager_can_enter admits any manager; this checks THIS request (S1).
+    # Bulk approve calls this view, so it is covered too.
+    if not can_act_on(request.user, leave_request, "leave.change_leaverequest"):
+        messages.error(
+            request,
+            _("You can't approve {}'s leave request.").format(
+                leave_request.employee_id
+            ),
+        )
+        return no_permission(request)
     employee_id = leave_request.employee_id
     leave_type_id = leave_request.leave_type_id
     available_leave = AvailableLeave.objects.get(
@@ -1175,11 +1190,20 @@ def leave_request_cancel(request, id, emp_id=None):
           Otherwise, it returns to the default leave request view template.
 
     """
+    # Object check first (S1); bulk reject calls this view too.
+    leave_request = LeaveRequest.objects.get(id=id)
+    if not can_act_on(request.user, leave_request, "leave.change_leaverequest"):
+        messages.error(
+            request,
+            _("You can't reject {}'s leave request.").format(
+                leave_request.employee_id
+            ),
+        )
+        return no_permission(request)
     form = RejectForm()
     if request.method == "POST":
         form = RejectForm(request.POST)
         if form.is_valid():
-            leave_request = LeaveRequest.objects.get(id=id)
             employee_id = leave_request.employee_id
             leave_type_id = leave_request.leave_type_id
             available_leave = AvailableLeave.objects.get(
@@ -3232,6 +3256,7 @@ def leave_request_create(request):
 
 
 @login_required
+@allocation_access_required
 def leave_allocation_request_view(request):
     """
     function used to view leave allocation request.
@@ -3289,6 +3314,7 @@ def leave_allocation_request_view(request):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 def leave_allocation_request_single_view(request, req_id):
     """
     function used to present the leave allocation request detailed view.
@@ -3308,6 +3334,17 @@ def leave_allocation_request_single_view(request, req_id):
         requests_ids = json.loads(requests_ids_json)
         previous_id, next_id = closest_numbers(requests_ids, req_id)
     leave_allocation_request = LeaveAllocationRequest.find(req_id)
+    # Any id used to be viewable by anyone: allow HR, this employee's manager
+    # and the employee only.
+    if leave_allocation_request is None or not (
+        leave_allocation_request.employee_id == request.user.employee_get
+        or can_act_on(
+            request.user,
+            leave_allocation_request,
+            "leave.view_leaveallocationrequest",
+        )
+    ):
+        return no_permission(request)
     context = {
         "leave_allocation_request": leave_allocation_request,
         "my_request": my_request,
@@ -3325,6 +3362,7 @@ def leave_allocation_request_single_view(request, req_id):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 def leave_allocation_request_create(request):
     """
     function used to create leave allocation request.
@@ -3336,18 +3374,32 @@ def leave_allocation_request_create(request):
     GET : return leave allocation request form template
     POST : return leave allocation request view
     """
-    employee = request.user.employee_get
-    form = LeaveAllocationRequestForm(initial={"employee_id": employee})
+    # HR: everyone. Managers: their reportees only, not themselves.
+    form = LeaveAllocationRequestForm()
     form = choosesubordinates(request, form, "leave.add_leaveallocationrequest")
-    form.fields["employee_id"].queryset = form.fields[
-        "employee_id"
-    ].queryset | Employee.objects.filter(employee_user_id=request.user)
     if request.method == "POST":
         form = LeaveAllocationRequestForm(request.POST, request.FILES)
+        # Re-applied after binding, so a crafted POST for anyone else fails
+        # validation instead of being saved.
+        form = choosesubordinates(request, form, "leave.add_leaveallocationrequest")
         if form.is_valid():
             leave_allocation_request = form.save(commit=False)
             leave_allocation_request.skip_history = False
             leave_allocation_request.save()
+            if can_grant_directly(request.user, leave_allocation_request.employee_id):
+                # HR decision 4: a manager's or HR's grant applies at once.
+                approve_allocation(leave_allocation_request)
+                messages.success(request, _("Leave days granted"))
+                notify_direct_grant(request.user.employee_get, leave_allocation_request)
+                response = render(
+                    request,
+                    "leave/leave_allocation_request/leave_allocation_request_create.html",
+                    {"form": form},
+                )
+                return HttpResponse(
+                    response.content.decode("utf-8")
+                    + "<script>location. reload();</script>"
+                )
             messages.success(request, _("New Leave allocation request is created"))
             with contextlib.suppress(Exception):
                 notify.send(
@@ -3381,6 +3433,7 @@ def leave_allocation_request_create(request):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 def leave_allocation_request_filter(request):
     field = request.GET.get("field")
     employee = request.user.employee_get
@@ -3466,6 +3519,7 @@ def leave_allocation_request_filter(request):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 @leave_allocation_change_permission()
 def leave_allocation_request_update(request, req_id):
     """
@@ -3482,13 +3536,14 @@ def leave_allocation_request_update(request, req_id):
     leave_allocation_request = LeaveAllocationRequest.objects.get(id=req_id)
     form = LeaveAllocationRequestForm(instance=leave_allocation_request)
     form = choosesubordinates(request, form, "leave.add_leaveallocationrequest")
-    form.fields["employee_id"].queryset = form.fields[
-        "employee_id"
-    ].queryset | Employee.objects.filter(employee_user_id=request.user)
     if leave_allocation_request.status != "approved":
         if request.method == "POST":
             form = LeaveAllocationRequestForm(
                 request.POST, request.FILES, instance=leave_allocation_request
+            )
+            # Same scope as create, re-applied after binding.
+            form = choosesubordinates(
+                request, form, "leave.add_leaveallocationrequest"
             )
             if form.is_valid():
                 leave_allocation_request = form.save(commit=False)
@@ -3530,42 +3585,24 @@ def leave_allocation_request_update(request, req_id):
 
 
 @login_required
+@require_http_methods(["POST"])
+@allocation_access_required
 @leave_allocation_reject_permission()
 def leave_allocation_request_approve(request, req_id):
     """
     function used to approve a leave allocation request.
+
+    POST only: approving changes a balance, so a link or prefetch must not.
 
     Parameters:
     request (HttpRequest): The HTTP request object.
     req_id : leave allocation request id
 
     Returns:
-    GET :It returns to the default leave allocation request view template.
+    POST : reloads the page (HTMX), or returns to the previous page.
     """
     leave_allocation_request = LeaveAllocationRequest.objects.get(id=req_id)
-    if leave_allocation_request.status == "requested":
-        employee = leave_allocation_request.employee_id
-        if (
-            employee.available_leave.all()
-            .filter(leave_type_id=leave_allocation_request.leave_type_id)
-            .exists()
-        ):
-            available_leave = (
-                employee.available_leave.all()
-                .filter(leave_type_id=leave_allocation_request.leave_type_id)
-                .first()
-            )
-        else:
-            available_leave = prepare_new_balance(
-                AvailableLeave(
-                    leave_type_id=leave_allocation_request.leave_type_id,
-                    employee_id=employee,
-                )
-            )
-        available_leave.available_days += leave_allocation_request.requested_days
-        available_leave.save()
-        leave_allocation_request.status = "approved"
-        leave_allocation_request.save()
+    if approve_allocation(leave_allocation_request):
         messages.success(request, _("Leave allocation request approved successfully"))
         with contextlib.suppress(Exception):
             notify.send(
@@ -3582,11 +3619,14 @@ def leave_allocation_request_approve(request, req_id):
             )
     else:
         messages.error(request, _("The leave allocation request can't be approved"))
+    if request.headers.get("HX-Request"):
+        return HttpResponse("<script>window.location.reload();</script>")
     return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
 
 
 @login_required
 @hx_request_required
+@allocation_access_required
 @leave_allocation_reject_permission()
 def leave_allocation_request_reject(request, req_id):
     """
@@ -3611,17 +3651,7 @@ def leave_allocation_request_reject(request, req_id):
             if form.is_valid():
                 leave_allocation_request.reject_reason = form.cleaned_data["reason"]
                 if leave_allocation_request.status == "approved":
-                    leave_type = leave_allocation_request.leave_type_id
-                    requested_days = leave_allocation_request.requested_days
-                    available_leave = AvailableLeave.objects.filter(
-                        leave_type_id=leave_type,
-                        employee_id=leave_allocation_request.employee_id,
-                    ).first()
-                    available_leave.available_days = max(
-                        0, available_leave.available_days - requested_days
-                    )
-
-                    available_leave.save()
+                    revoke_allocation(leave_allocation_request)
                 leave_allocation_request.status = "rejected"
                 leave_allocation_request.save()
                 messages.success(
@@ -3653,6 +3683,7 @@ def leave_allocation_request_reject(request, req_id):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 @leave_allocation_delete_permission()
 def leave_allocation_request_delete(request, req_id):
     """
@@ -4186,14 +4217,25 @@ def view_leaverequest_comment(request, leave_id):
     )
 
 
+def _can_see_allocation(request, allocation):
+    """The employee, their own manager, or HR (not any manager: audit S1)."""
+    return allocation is not None and (
+        allocation.employee_id == request.user.employee_get
+        or can_act_on(request.user, allocation, "leave.view_leaveallocationrequest")
+    )
+
+
 @login_required
 @hx_request_required
+@allocation_access_required
 def create_allocationrequest_comment(request, leave_id):
     """
     This method renders form and template to create Allocation request comments
     """
     previous_data = request.GET.urlencode()
     leave = LeaveAllocationRequest.objects.filter(id=leave_id).first()
+    if not _can_see_allocation(request, leave):
+        return no_permission(request)
     emp = request.user.employee_get
     form = LeaveallocationrequestcommentForm(
         initial={"employee_id": emp.id, "request_id": leave_id}
@@ -4305,18 +4347,17 @@ def create_allocationrequest_comment(request, leave_id):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 def view_allocationrequest_comment(request, leave_id):
     """
     This method is used to show Allocation request comments
     """
     leave_alloc_request = LeaveAllocationRequest.find(leave_id)
     if not (
-        request.user.employee_get == leave_alloc_request.employee_id
+        _can_see_allocation(request, leave_alloc_request)
         or request.user.has_perm("leave.view_leaveallocationrequestcomment")
-        or is_reportingmanager(request)
     ):
-        messages.warning(request, _("You don't have permission"))
-        return render(request, "decorator_404.html")
+        return no_permission(request)
     comments = LeaveallocationrequestComment.objects.filter(
         request_id=leave_id
     ).order_by("-created_at")
@@ -4350,6 +4391,7 @@ def view_allocationrequest_comment(request, leave_id):
 
 @login_required
 @hx_request_required
+@allocation_access_required
 def delete_allocationrequest_comment(request, comment_id):
     """
     This method is used to delete Allocation request comments
@@ -4360,7 +4402,9 @@ def delete_allocationrequest_comment(request, comment_id):
     if (
         request.user.employee_get == comment.employee_id
         or request.user.has_perm("leave.delete_leaveallocationrequestcomment")
-        or is_reportingmanager(request)
+        or can_act_on(
+            request.user, comment.request_id, "leave.view_leaveallocationrequest"
+        )
     ):
         comment.delete()
         messages.success(request, _("Comment deleted successfully!"))
@@ -4373,6 +4417,7 @@ def delete_allocationrequest_comment(request, comment_id):
 
 
 @login_required
+@allocation_access_required
 def delete_allocation_comment_file(request):
     """
     Used to delete attachment
@@ -4385,9 +4430,12 @@ def delete_allocation_comment_file(request):
     if (
         request.user.employee_get == comment.employee_id
         or request.user.has_perm("leave.delete_leaverequestfile")
-        or is_reportingmanager(request)
+        or can_act_on(
+            request.user, comment.request_id, "leave.view_leaveallocationrequest"
+        )
     ):
-        LeaverequestFile.objects.filter(id__in=ids).delete()
+        # Only this comment's own files, not any file id sent in the URL.
+        comment.files.filter(id__in=ids).delete()
         messages.success(request, _("File deleted successfully"))
     else:
         messages.warning(request, _("You don't have permission"))

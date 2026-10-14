@@ -185,7 +185,7 @@
             </div>
         {% endif %}
     </div>
-    {% if request.user|is_reportingmanager %}
+    {% if request.user|is_reportingmanager or perms.leave.view_leaveallocationrequest %}
         <div class="oh-tabs__content" id="tab_2">
             {% if leave_allocation_requests %}
                 <div class="oh-card">
@@ -296,7 +296,9 @@
                                                             <div class="oh-btn-group" >
                                                                 {% if perms.leave.change_leaveallocationrequest or request.user|is_reportingmanager %}
                                                                     {% if leave_allocation_request.status == 'requested' %}
-                                                                        <a type="submit" href="{% url 'leave-allocation-request-approve' leave_allocation_request.id %}"
+                                                                        <a hx-post="{% url 'leave-allocation-request-approve' leave_allocation_request.id %}"
+                                                                            hx-confirm="{% trans 'Do you want to approve this request?' %}"
+                                                                            hx-target="this" hx-swap="outerHTML"
                                                                             title="{% trans 'Approve' %}"
                                                                             class="oh-btn oh-btn--success w-100">
                                                                             <ion-icon class="me-1" name="checkmark-outline"></ion-icon>

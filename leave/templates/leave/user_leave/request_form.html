@@ -14,6 +14,9 @@
     <div id="availableLeaveCount" style="height: 40px;display: none;"></div>
 </div>
 <div class="oh-modal__dialog-body">
+    <div class="oh-alert oh-alert--info mb-3" style="opacity: 1">
+        {% trans "Taking time off? Request it here. Leave allocation requests are only for granting extra days." %}
+    </div>
     <form hx-post="{% url 'leave-request-create' %}?{{pd}}" hx-target="#objectCreateModalTarget"
         hx-encoding="multipart/form-data" id="userLeaveForm">
         {{form.as_p}}
