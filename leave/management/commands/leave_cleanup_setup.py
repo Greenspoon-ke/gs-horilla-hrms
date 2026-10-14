@@ -127,9 +127,10 @@ class Command(BaseCommand):
                 )
                 user.user_permissions.remove(*direct)
                 changes += 1
-            others = user.user_permissions.filter(
-                content_type__app_label="leave"
-            ).values_list("codename", flat=True)
-            if others:
-                write(f"  user {user.pk}: keeps direct {sorted(others)} (not changed)")
+            others = user.user_permissions.filter(content_type__app_label="leave")
+            if others.exists():
+                write(
+                    f"  user {user.pk}: keeps {others.count()} other direct leave "
+                    "permission(s) (not changed)"
+                )
         return changes
