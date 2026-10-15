@@ -238,6 +238,50 @@ class ConversionTests(TestCase):
         refused.refresh_from_db()
         self.assertEqual((refused.status, refused.reject_reason), ("rejected", "no"))
 
+    def test_hr_can_reject_a_pending_one_with_a_reason(self):
+        # A past pending request HR says was not taken: rejected, with the
+        # clean-up's reason, both on a first run and over an earlier one.
+        pending = self.allocation(3, self.at(2026, 8, 3), status="requested")
+        self.convert(apply=True)
+        self.assertEqual(self.converted(pending).status, "requested")
+        reason = "Removed in leave clean-up 2026: not taken"
+        path = Path(self.out_dir) / "decisions.csv"
+        path.write_text(
+            "alloc_id,keep_drop,start_date,end_date,status,reject_reason\n"
+            f"{pending.pk},,,,rejected,{reason}\n"
+        )
+        self.assertIn(": update", self.convert("--decisions", str(path)))
+        self.convert("--decisions", str(path), apply=True)
+        leave_request = self.converted(pending)
+        self.assertEqual((leave_request.status, leave_request.reject_reason), ("rejected", reason))
+        self.assertEqual(
+            (leave_request.approved_available_days, leave_request.approved_carryforward_days),
+            (0, 0),
+        )
+        self.assertEqual(self.changes(self.convert("--decisions", str(path))), 0)
+        # Without the column, a later run keeps the reason it finds.
+        self.assertEqual(self.changes(self.convert()), 0)
+        # A new reason alone is a change too.
+        path.write_text(
+            "alloc_id,keep_drop,start_date,end_date,status,reject_reason\n"
+            f"{pending.pk},,,,rejected,not taken (HR)\n"
+        )
+        self.convert("--decisions", str(path), apply=True)
+        self.assertEqual(self.converted(pending).reject_reason, "not taken (HR)")
+
+    def test_reject_reason_needs_status_rejected(self):
+        allocation = self.allocation(3, self.at(2026, 8, 3), status="requested")
+        path = Path(self.out_dir) / "decisions.csv"
+        cases = [("approved", "not taken"), ("", "not taken"), ("rejected", "x" * 256)]
+        for status, reason in cases:
+            path.write_text(
+                "alloc_id,keep_drop,start_date,end_date,status,reject_reason\n"
+                f"{allocation.pk},,,,{status},{reason}\n"
+            )
+            with self.subTest(status=status), self.assertRaises(CommandError):
+                self.convert("--decisions", str(path))
+        self.assertFalse(LeaveRequest.objects.exists())
+
     def test_reverse_restores_everything(self):
         approved = self.allocation(5, self.at(2026, 7, 29))
         refused = self.allocation(2, self.at(2026, 8, 3), status="rejected", reason="no")

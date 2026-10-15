@@ -8,7 +8,7 @@ Rules:
 
 - Each allocation becomes a leave request with the same status (HR can set
   another one in the decisions file, e.g. a week a manager rejected but HR's
-  rota confirms was taken): approved
+  rota confirms was taken, with a reject reason for a rejected one): approved
   counts as days taken in the Annual Leave rebuild, requested waits for its
   manager, rejected stays rejected. Nothing is deducted here and no mail or
   notification is sent: the rebuild is the only thing that counts the days.
@@ -230,8 +230,9 @@ def parse_day(value, name, line):
 
 def read_decisions(raw_path, known_ids):
     """
-    HR's CSV: alloc_id,keep_drop,start_date,end_date[,status] (blank = default).
-    status (approved, requested or rejected) replaces the allocation's own.
+    HR's CSV: alloc_id,keep_drop,start_date,end_date[,status][,reject_reason]
+    (blank = default). status (approved, requested or rejected) replaces the
+    allocation's own; reject_reason only goes with status rejected.
     """
     if not raw_path:
         return {}
@@ -271,11 +272,21 @@ def read_decisions(raw_path, known_ids):
                 raise ConversionRefused(
                     f"decisions line {line}: status is one of {', '.join(STATUSES)}"
                 )
+            reject_reason = record.get("reject_reason", "")
+            if reject_reason and status != "rejected":
+                raise ConversionRefused(
+                    f"decisions line {line}: reject_reason needs status rejected"
+                )
+            if len(reject_reason) > DESCRIPTION_LIMIT:
+                raise ConversionRefused(
+                    f"decisions line {line}: reject_reason is over {DESCRIPTION_LIMIT} characters"
+                )
             decisions[alloc_id] = {
                 "keep_drop": keep_drop,
                 "start": start,
                 "end": end,
                 "status": status,
+                "reject_reason": reject_reason,
             }
     return decisions
 
@@ -301,6 +312,7 @@ class Plan:
     end_breakdown: str = "full_day"
     computed_days: float = None
     leave_request_id: int = None
+    reject_reason: str = ""  # the leave request's, not the allocation's
     action: str = "none"  # create | update | mark | unconvert | drop | none
     flags: list = field(default_factory=list)
 
@@ -308,6 +320,7 @@ class Plan:
         return (
             self.action,
             self.status,
+            self.reject_reason,
             self.start,
             self.end,
             self.start_breakdown,
@@ -390,6 +403,10 @@ def plan_allocation(allocation, duplicate_of, decision):
         plan.status = decision["status"]
     elif existing:
         plan.status = existing.status
+    if decision and decision["reject_reason"]:
+        plan.reject_reason = decision["reject_reason"]
+    elif existing:
+        plan.reject_reason = existing.reject_reason or ""
     reason_now = allocation.reject_reason or ""
     marked_converted = CONVERTED in reason_now and MARK in reason_now
     marked_dropped = MARK in reason_now and not marked_converted
@@ -450,11 +467,19 @@ def plan_allocation(allocation, duplicate_of, decision):
         plan.action = "create"
     elif (
         existing.status,
+        existing.reject_reason or "",
         existing.start_date,
         existing.end_date,
         existing.start_date_breakdown,
         existing.end_date_breakdown,
-    ) != (plan.status, plan.start, plan.end, plan.start_breakdown, plan.end_breakdown):
+    ) != (
+        plan.status,
+        plan.reject_reason,
+        plan.start,
+        plan.end,
+        plan.start_breakdown,
+        plan.end_breakdown,
+    ):
         plan.action = "update"
     elif not (marked_converted and allocation.status == "rejected"):
         plan.action = "mark"
@@ -513,6 +538,7 @@ def _mark(allocation, reason):
 
 def _save_request(leave_request, plan):
     leave_request.status = plan.status
+    leave_request.reject_reason = plan.reject_reason
     leave_request.start_date = plan.start
     leave_request.end_date = plan.end
     leave_request.start_date_breakdown = plan.start_breakdown

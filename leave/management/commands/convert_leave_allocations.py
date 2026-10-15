@@ -7,10 +7,11 @@ the dry run's row count:
         [--decisions ~/hrms-local/allocation-decisions.csv]
     python manage.py convert_leave_allocations [...] --apply --confirm-rows N
 
-decisions.csv columns: alloc_id,keep_drop,start_date,end_date[,status].
-keep_drop is keep, drop or blank (default: duplicates dropped); blank dates
-mean assumed dates; status (approved, requested, rejected) replaces the
-allocation's own, blank keeps it. Run accrue_leave --rebuild afterwards: it counts the approved ones.
+decisions.csv columns: alloc_id,keep_drop,start_date,end_date[,status]
+[,reject_reason]. keep_drop is keep, drop or blank (default: duplicates
+dropped); blank dates mean assumed dates; status (approved, requested,
+rejected) replaces the allocation's own, blank keeps it; reject_reason is the
+leave request's reason, only with status rejected. Run accrue_leave --rebuild afterwards: it counts the approved ones.
 
 Undo with the mapping file an --apply run wrote:
 
