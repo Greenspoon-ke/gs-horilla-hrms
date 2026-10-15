@@ -54,6 +54,7 @@ class HorillaAutomationConfig(AppConfig):
                 "convert_leave_allocations",
                 "leave_cleanup_setup",
                 "record_hr_leave",
+                "leave_cleanup_preview",
             ]
         ):
             from horilla_automations.signals import start_automation

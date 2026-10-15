@@ -83,7 +83,7 @@ if not any(
     cmd in sys.argv
     # "test": the 20s job would otherwise mutate rows while tests run.
     # "accrue_leave" and the leave clean-up commands: keep each the only
-    # writer of leave data while it runs.
+    # writer of leave data while it runs; the preview must not write at all.
     for cmd in [
         "makemigrations",
         "migrate",
@@ -95,6 +95,7 @@ if not any(
         "convert_leave_allocations",
         "leave_cleanup_setup",
         "record_hr_leave",
+        "leave_cleanup_preview",
     ]
 ):
     """
