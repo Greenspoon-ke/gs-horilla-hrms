@@ -43,12 +43,14 @@ class AccrualTestCase(TestCase):
         self.out_dir = tempfile.mkdtemp(prefix="accrual-test-")
         self.addCleanup(shutil.rmtree, self.out_dir, ignore_errors=True)
         # Annual Leave as configured in production after the 2026 leave
-        # clean-up (leave_cleanup_setup): no yearly reset, no carry-forward.
+        # clean-up (leave_cleanup_setup): no Horilla reset; the carry-forward
+        # cap and expiry are applied by the accrual engine.
         self.annual = LeaveType.objects.create(
             name="Annual Leave",
             total_days=24,
             reset=False,
-            carryforward_type="no carryforward",
+            carryforward_type="carryforward",
+            carryforward_max=10,
         )
 
     def employee(self, code, joined, active=True):
@@ -136,23 +138,31 @@ class DailyAccrualTests(AccrualTestCase):
         # June to September: 4 months of 2 days.
         self.assertEqual(self.values(row), (11, 0, date(2026, 10, 1)))
 
-    def test_year_end_carries_nothing(self):
+    def test_year_end_carries_at_most_10(self):
         row = self.balance(
             self.employee("GSL001", date(2026, 1, 5)), 15, 0, marker=date(2026, 12, 1)
         )
         self.daily(date(2027, 1, 3))
         row.refresh_from_db()
-        # December's 2 days are credited first, then all 17 lapse (cap 0).
-        self.assertEqual((row.available_days, row.carryforward_days), (0, 0))
+        # December's 2 days are credited first: 17 left, 10 carried, 7 lapse.
+        self.assertEqual((row.available_days, row.carryforward_days), (0, 10))
         self.assertEqual(row.last_accrual_date, date(2027, 1, 1))
         self.assertEqual(row.reset_date, date(2028, 1, 1))
 
-    def test_new_year_starts_from_zero(self):
+    def test_year_end_carries_a_balance_below_the_cap_in_full(self):
         row = self.balance(
             self.employee("GSL001", date(2026, 1, 5)), 4, 0, marker=date(2026, 12, 1)
         )
         self.daily(date(2027, 2, 1))  # December, then January of the new year
-        self.assertEqual(self.values(row), (2, 0, date(2027, 2, 1)))
+        self.assertEqual(self.values(row), (2, 6, date(2027, 2, 1)))
+
+    @override_settings(LEAVE_CARRY_CAP="6")
+    def test_the_cap_is_a_setting(self):
+        row = self.balance(
+            self.employee("GSL001", date(2026, 1, 5)), 15, 0, marker=date(2026, 12, 1)
+        )
+        self.daily(date(2027, 1, 3))
+        self.assertEqual(self.values(row)[:2], (0, 6))
 
     def test_negative_balance_carries_into_the_new_year_as_debt(self):
         # HR decision Q3: no write-off at year end.
@@ -303,8 +313,9 @@ class RebuildTests(AccrualTestCase):
         self.balance(self.employee("GSL001", date(2026, 6, 1)))
         for field, value in [
             ("total_days", 21),
-            ("carryforward_type", "carryforward"),
+            ("carryforward_type", "no carryforward"),
             ("carryforward_type", "carryforward expire"),
+            ("reset", True),
         ]:
             with self.subTest(field=field, value=value):
                 LeaveType.objects.filter(pk=self.annual.pk).update(**{field: value})
@@ -313,14 +324,26 @@ class RebuildTests(AccrualTestCase):
                 with self.assertRaises(AccrualRefused):
                     self.daily(TODAY)
                 LeaveType.objects.filter(pk=self.annual.pk).update(
-                    total_days=24, carryforward_type="no carryforward"
+                    total_days=24, carryforward_type="carryforward", reset=False
                 )
 
-    def test_opening_carry_is_refused_now_the_cap_is_0(self):
+    def test_opening_carry_above_the_cap_is_refused(self):
         row = self.balance(self.employee("GSL001", date(2021, 6, 1)))
-        result = self.rebuild({"GSL999": date(2026, 6, 1)}, opening_carry={"GSL001": 2})
+        result = self.rebuild({"GSL999": date(2026, 6, 1)}, opening_carry={"GSL001": 11})
         self.assertEqual(result["plans"][0].action, "refuse")
         self.assertEqual(self.values(row), (24, 0, None))
+
+    def test_excluded_rows_are_untouched_and_listed(self):
+        employee = self.employee("GSL001", date(2026, 6, 1))
+        row = self.balance(employee, 24, 0)
+        history = row.history_set.count()
+        result = self.apply_rebuild({"GSL001": date(2026, 6, 1)}, excluded={"GSL001"})
+        self.assertEqual(
+            [(plan.action, plan.reason) for plan in result["plans"]],
+            [("skip", "excluded by HR")],
+        )
+        self.assertEqual(self.values(row), (24, 0, None))
+        self.assertEqual(row.history_set.count(), history)
 
 
 @override_settings(LEAVE_ALLOCATION_CUTOVER="2026-10-01")

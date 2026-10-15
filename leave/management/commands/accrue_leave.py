@@ -14,6 +14,7 @@ accrual. Dry run first, then apply with the dry run's row count:
         --sheet ~/hrms-local/joiners_2026_sheet_dates.csv \
         [--overrides ~/hrms-local/overrides.csv] \
         [--opening-carry ~/hrms-local/opening_carry.csv] \
+        [--exclude ~/hrms-local/exclusions.csv] \
         [--negative record|zero]
     python manage.py accrue_leave --rebuild --through 2026-09-30 ... \
         --apply --confirm-rows N
@@ -23,6 +24,8 @@ is enrolled from that date unless its Annual Leave was assigned before 2026;
 a row not on it is pre-2026 staff and waits for opening carry.
 overrides.csv columns: code,start_date (YYYY-MM-DD, replaces the join date).
 opening_carry.csv columns: code,opening_carry.
+exclusions.csv columns: code,reason (rows HR keeps out of the rebuild; their
+balances are not touched).
 
 Reports and snapshots go to --out-dir (default ~/hrms-local, mode 600 files);
 paths inside the repository are refused. Output shows employee codes and
@@ -36,8 +39,10 @@ from datetime import date
 from django.core.management.base import BaseCommand, CommandError
 
 from leave.accrual import (
+    EXCLUDED,
     AccrualRefused,
     parse_carry,
+    parse_reason,
     parse_sheet_date,
     parse_start,
     read_code_file,
@@ -45,7 +50,9 @@ from leave.accrual import (
     run_rebuild,
 )
 
-REBUILD_ONLY = ("through", "sheet", "overrides", "opening_carry", "confirm_rows")
+REBUILD_ONLY = (
+    "through", "sheet", "overrides", "opening_carry", "exclude", "confirm_rows"
+)
 
 
 class Command(BaseCommand):
@@ -71,6 +78,9 @@ class Command(BaseCommand):
         parser.add_argument("--overrides", help="Rebuild: CSV of code,start_date.")
         parser.add_argument(
             "--opening-carry", help="Rebuild: CSV of code,opening_carry."
+        )
+        parser.add_argument(
+            "--exclude", help="Rebuild: CSV of code,reason to leave untouched."
         )
         parser.add_argument(
             "--negative",
@@ -110,12 +120,13 @@ class Command(BaseCommand):
                     ),
                     negative=options["negative"],
                     confirm_rows=options["confirm_rows"],
+                    excluded=self.read(options["exclude"], "reason", parse_reason),
                 )
             else:
                 if any(options[name] for name in REBUILD_ONLY):
                     raise CommandError(
-                        "--through, --sheet, --overrides, --opening-carry and "
-                        "--confirm-rows need --rebuild."
+                        "--through, --sheet, --overrides, --opening-carry, "
+                        "--exclude and --confirm-rows need --rebuild."
                     )
                 result = run_daily(apply=apply, out_dir=options["out_dir"])
         except AccrualRefused as error:
@@ -160,6 +171,9 @@ class Command(BaseCommand):
                 "2026 join date in system but not on HR sheet (held): "
                 + ", ".join(result["missing_from_sheet"])
             )
+        excluded = [plan.code for plan in plans if plan.reason == EXCLUDED]
+        if excluded:
+            write("excluded by HR (balance untouched): " + ", ".join(excluded))
         if result.get("unmatched_codes"):
             write(
                 "codes in input files with no Annual Leave row: "

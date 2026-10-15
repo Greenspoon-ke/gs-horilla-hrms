@@ -25,3 +25,7 @@ class _DisableMigrations:
 # Migrations are git-ignored in this repository, so a fresh checkout cannot
 # build the test database from them. Create the tables from the models instead.
 MIGRATION_MODULES = _DisableMigrations()
+
+# A test database has no departments, and an unknown exempt department refuses
+# every accrual run; tests that need exempt teams set them with override_settings.
+LEAVE_CARRY_EXEMPT_DEPARTMENTS = []

@@ -5,7 +5,10 @@ Rules (HR decisions D1-D8 of the accrual brief, with the D4', D5' and D7'
 revisions):
 
 - Only the leave type named exactly "Annual Leave" accrues. It must grant 24
-  days a year and be set to "no carryforward", or nothing runs.
+  days a year and be set to reset=False and "carryforward", or nothing runs:
+  Horilla's own reset and expiry must never touch it, and booking only counts
+  carried days on a carry-forward type. Year-end close and the 30 June expiry
+  are done here, by the daily run.
 - A row is on accrual when ``AvailableLeave.last_accrual_date`` is set. The
   value is always the 1st of the next month to credit; null rows are never
   touched here.
@@ -13,12 +16,14 @@ revisions):
   employee joined on the 1st-19th, otherwise accrual starts the next month.
   Nothing accrues before 1 January 2026. Month M is credited on the 1st of
   M+1, using the Africa/Nairobi date whatever the server's TIME_ZONE.
-- When December is credited the leave year closes. Nothing carries forward
-  (HR's leave clean-up, 2026: the cap is 0): a positive balance lapses, a
-  negative one stays in available_days as debt. Departments listed in
-  LEAVE_CARRY_EXEMPT_DEPARTMENTS use LEAVE_CARRY_EXEMPT_CAP instead (empty: no
-  limit). With LEAVE_CARRY_EXPIRES_30_JUNE, carried days still unused when
-  June is credited lapse (carry is spent first, so what is left is unused).
+- When December is credited the leave year closes (HR decisions of
+  2026-10-15): the unused balance carries forward up to LEAVE_CARRY_CAP, the
+  rest lapses, and a negative balance stays in available_days as debt.
+  Departments listed in LEAVE_CARRY_EXEMPT_DEPARTMENTS use
+  LEAVE_CARRY_EXEMPT_CAP instead (empty: no limit). With
+  LEAVE_CARRY_EXPIRES_30_JUNE, carried days still unused when June is credited
+  lapse (carry is spent first, so what is left is unused); with
+  LEAVE_CARRY_EXEMPT_SKIP_EXPIRY the exempt departments keep theirs.
 - The one-off rebuild sets 2026 balances to opening carry + accrued + granted
   - taken, where taken is approved Annual Leave starting on or after
   1 January 2026 and is spent from carry first, and granted is approved leave
@@ -27,8 +32,11 @@ revisions):
   requests instead, so they count as taken). HR's 2026 joiners sheet is the
   list of 2026 joiners, and its date replaces the system join date (D7'). Rows
   with Annual Leave assigned before 2026 are pre-2026 staff even when on the
-  sheet. Rows not on the sheet wait for HR's opening carry (0 since the
-  clean-up); a null or 2026-08-05 join date then needs an override.
+  sheet. Rows not on the sheet wait for HR's opening carry (0 except the
+  days HR restored); a null or 2026-08-05 join date then needs an override.
+  Codes HR excludes are left untouched. The rebuild never expires carry: the
+  opening carry is what HR says is still valid in 2026, and whatever is left
+  of it joins the 2026 year-end close like any other unused day.
 - A new Annual Leave row starts at 0 with ``last_accrual_date`` at its first
   accruing month (``prepare_new_balance``), so the daily run catches it up.
 
@@ -62,9 +70,9 @@ from leave.models import (
 
 ACCRUAL_LEAVE_TYPE_NAME = "Annual Leave"
 REQUIRED_TOTAL_DAYS = 24
-REQUIRED_CARRY_TYPE = "no carryforward"
-# HR's leave clean-up (2026): no carry-forward for anyone.
-CARRY_CAP = 0
+REQUIRED_CARRY_TYPE = "carryforward"
+# Default year-end cap; LEAVE_CARRY_CAP overrides it.
+CARRY_CAP = 10
 MONTHS_PER_YEAR = 12
 JOIN_CUTOFF_DAY = 20
 ACCRUAL_EPOCH = date(2026, 1, 1)
@@ -77,6 +85,7 @@ ADVISORY_LOCK_KEY = 7_302_026
 # simple_history stores the change reason in a 100-character column.
 MAX_REASON_LENGTH = 100
 NOT_ON_SHEET_2026 = "hold: 2026 join date in system, not on HR sheet"
+EXCLUDED = "excluded by HR"
 
 REPORT_COLUMNS = [
     "code",
@@ -117,12 +126,13 @@ class CarryRules:
     exempt_cap: float = math.inf
     expires_30_june: bool = False
     exempt_skip_expiry: bool = False
+    cap: float = CARRY_CAP
 
     def is_exempt(self, employee):
         return department_name(employee) in self.exempt_departments
 
     def cap_for(self, employee):
-        return self.exempt_cap if self.is_exempt(employee) else CARRY_CAP
+        return self.exempt_cap if self.is_exempt(employee) else self.cap
 
     def expires_for(self, employee):
         if not self.expires_30_june:
@@ -146,20 +156,28 @@ def carry_rules():
             "Unknown department(s) in LEAVE_CARRY_EXEMPT_DEPARTMENTS: "
             + ", ".join(sorted(names - known))
         )
+    raw_cap = str(getattr(settings, "LEAVE_CARRY_CAP", CARRY_CAP)).strip()
+    try:
+        cap = float(raw_cap)
+    except ValueError:
+        raise AccrualRefused("LEAVE_CARRY_CAP must be a number.") from None
+    if not math.isfinite(cap) or cap < 0:
+        raise AccrualRefused("LEAVE_CARRY_CAP must be zero or more.")
     raw = str(getattr(settings, "LEAVE_CARRY_EXEMPT_CAP", "") or "").strip()
     try:
-        cap = math.inf if raw == "" else float(raw)
+        exempt_cap = math.inf if raw == "" else float(raw)
     except ValueError:
         raise AccrualRefused("LEAVE_CARRY_EXEMPT_CAP must be a number or empty.")
-    if cap < CARRY_CAP:
+    if exempt_cap < cap:
         raise AccrualRefused(
-            f"LEAVE_CARRY_EXEMPT_CAP {cap:g} is below the standard cap {CARRY_CAP}."
+            f"LEAVE_CARRY_EXEMPT_CAP {exempt_cap:g} is below the standard cap {cap:g}."
         )
     return CarryRules(
         frozenset(names),
-        cap,
+        exempt_cap,
         bool(getattr(settings, "LEAVE_CARRY_EXPIRES_30_JUNE", False)),
         bool(getattr(settings, "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", False)),
+        cap,
     )
 
 
@@ -281,25 +299,40 @@ def prepare_new_balance(row):
     return row
 
 
-def accrual_leave_type():
-    """The one leave type that accrues, after checking HR's fixed settings."""
+def find_accrual_type():
     types = list(LeaveType._base_manager.filter(name=ACCRUAL_LEAVE_TYPE_NAME))
     if len(types) != 1:
         raise AccrualRefused(
             f'Expected one leave type named "{ACCRUAL_LEAVE_TYPE_NAME}", '
             f"found {len(types)}."
         )
-    leave_type = types[0]
+    return types[0]
+
+
+def set_accrual_type(leave_type):
+    """
+    Give the type the settings check_accrual_type requires, in memory only;
+    True if anything changed. leave_cleanup_setup saves it, the preview never.
+    """
+    if not leave_type.reset and leave_type.carryforward_type == REQUIRED_CARRY_TYPE:
+        return False
+    leave_type.reset = False
+    leave_type.carryforward_type = REQUIRED_CARRY_TYPE
+    return True
+
+
+def check_accrual_type(leave_type):
     if leave_type.total_days != REQUIRED_TOTAL_DAYS:
         raise AccrualRefused(
             f"total_days is {leave_type.total_days}, expected {REQUIRED_TOTAL_DAYS}."
         )
-    # CARRY_CAP is 0, so the type must not carry anything either: booking and
-    # the reset job would otherwise still count or create carried days.
-    if leave_type.carryforward_type != REQUIRED_CARRY_TYPE:
+    # Horilla's 20-second leave_reset would otherwise refill or expire these
+    # rows, and "no carryforward" would hide carried days from booking.
+    if leave_type.reset or leave_type.carryforward_type != REQUIRED_CARRY_TYPE:
         raise AccrualRefused(
-            f"carryforward_type is {leave_type.carryforward_type!r}, "
-            f"expected {REQUIRED_CARRY_TYPE!r}."
+            f"reset={leave_type.reset} carryforward_type="
+            f"{leave_type.carryforward_type!r}, expected reset=False and "
+            f"{REQUIRED_CARRY_TYPE!r} (run leave_cleanup_setup)."
         )
     row_count = AvailableLeave._base_manager.filter(leave_type_id=leave_type).count()
     if row_count > MAX_ROWS:
@@ -307,6 +340,11 @@ def accrual_leave_type():
             f"{row_count} balance rows exceed the safety limit of {MAX_ROWS}."
         )
     return leave_type
+
+
+def accrual_leave_type():
+    """The one leave type that accrues, after checking HR's fixed settings."""
+    return check_accrual_type(find_accrual_type())
 
 
 def employee_code(employee):
@@ -368,12 +406,20 @@ def _current(row):
 
 def plan_rebuild_row(
     row, leave_type, through, sheet, overrides, opening_carry, negative,
-    rules=CarryRules(),
+    rules=CarryRules(), excluded=frozenset(), unsaved=None,
 ):
-    """Absolute 2026 balance for one row, credited through the month of ``through``."""
+    """
+    Absolute 2026 balance for one row, credited through the month of ``through``.
+
+    ``unsaved`` is only for leave_cleanup_preview: {employee pk: {status: days}}
+    of leave requests the clean-up steps would create or change but that are
+    not saved, added to what is read from the database.
+    """
     employee = row.employee_id
     code = employee_code(employee)
     plan = RowPlan(row.pk, code, _current(row))
+    if code.upper() in excluded:
+        return plan.stop("skip", EXCLUDED)
     if not (employee.is_active and row.is_active):
         return plan.stop("skip", "inactive")
     marker = month_start(through) + relativedelta(months=1)
@@ -420,7 +466,12 @@ def plan_rebuild_row(
     plan.accrued = round(plan.months * leave_type.total_days / MONTHS_PER_YEAR, 3)
     if plan.accrued > leave_type.total_days:
         return plan.stop("refuse", "accrued above one year's entitlement")
-    plan.taken = _requested_days(employee.pk, leave_type, "approved")
+    extra = (unsaved or {}).get(employee.pk, {})
+    plan.taken = round(
+        _requested_days(employee.pk, leave_type, "approved")
+        + extra.get("approved", 0),
+        3,
+    )
     # Grants are part of the absolute value, so a rebuild never wipes them.
     plan.allocated = _allocated_days(employee.pk, leave_type, through.year)
     plan.opening_carry = opening
@@ -432,7 +483,8 @@ def plan_rebuild_row(
         plan.flags.append("NEGATIVE")
         if negative == "zero":
             available = 0.0
-    if _requested_days(employee.pk, leave_type, "requested") > available + carry:
+    pending = _requested_days(employee.pk, leave_type, "requested")
+    if round(pending + extra.get("requested", 0), 3) > available + carry:
         plan.flags.append("PENDING_EXCEEDS")
 
     plan.proposed = (available, carry)
@@ -654,6 +706,12 @@ def parse_start(value):
         raise ValueError("start_date must be YYYY-MM-DD") from None
 
 
+def parse_reason(value):
+    if not value:
+        raise ValueError("reason must not be empty")
+    return value
+
+
 def parse_sheet_date(value):
     try:
         joined = date.fromisoformat(value)
@@ -697,19 +755,7 @@ def run_daily(apply=False, out_dir="~/hrms-local", today=None):
     return result
 
 
-def run_rebuild(
-    through,
-    sheet,
-    apply=False,
-    out_dir="~/hrms-local",
-    overrides=None,
-    opening_carry=None,
-    negative="record",
-    confirm_rows=None,
-    today=None,
-):
-    """One-off: set 2026 balances from the rules, credited through ``through``."""
-    today = today or nairobi_today()
+def check_rebuild_args(through, sheet, negative, today):
     if through != month_start(through) + relativedelta(months=1, days=-1):
         raise AccrualRefused("--through must be the last day of a month.")
     if through.year != ACCRUAL_EPOCH.year:
@@ -720,7 +766,25 @@ def run_rebuild(
         raise AccrualRefused("--negative must be record or zero.")
     if not sheet:
         raise AccrualRefused("The HR joiners sheet is required (D7').")
+
+
+def run_rebuild(
+    through,
+    sheet,
+    apply=False,
+    out_dir="~/hrms-local",
+    overrides=None,
+    opening_carry=None,
+    negative="record",
+    confirm_rows=None,
+    today=None,
+    excluded=None,
+):
+    """One-off: set 2026 balances from the rules, credited through ``through``."""
+    today = today or nairobi_today()
+    check_rebuild_args(through, sheet, negative, today)
     overrides, opening_carry = overrides or {}, opening_carry or {}
+    excluded = frozenset(excluded or ())
 
     leave_type = accrual_leave_type()
     rules = carry_rules()
@@ -729,7 +793,8 @@ def run_rebuild(
 
     def replan(row):
         return plan_rebuild_row(
-            row, leave_type, through, sheet, overrides, opening_carry, negative, rules
+            row, leave_type, through, sheet, overrides, opening_carry, negative,
+            rules, excluded,
         )
 
     plans = [replan(row) for row in rows]
@@ -749,7 +814,7 @@ def run_rebuild(
         "stale": [],
         "snapshot": None,
         "unmatched_codes": sorted(
-            (set(sheet) | set(overrides) | set(opening_carry)) - known
+            (set(sheet) | set(overrides) | set(opening_carry) | excluded) - known
         ),
         "missing_from_sheet": [
             plan.code for plan in plans if plan.reason == NOT_ON_SHEET_2026

@@ -69,7 +69,7 @@ class CleanupSetupTests(TestCase):
         self.annual.refresh_from_db()
         self.assertEqual(
             (self.annual.reset, self.annual.carryforward_type),
-            (False, "no carryforward"),
+            (False, "carryforward"),
         )
         self.assertIsNone(self.annual.carryforward_expire_date)
         group = Group.objects.get(name=HR_LEAVE_GROUP)

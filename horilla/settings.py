@@ -233,17 +233,24 @@ USE_L10N = True
 
 USE_TZ = True
 
-# Annual Leave carry-over rules (leave/accrual.py). All off by default.
-# Department names (comma-separated) exempt from the year-end carry cap
-# (0 days since the 2026 leave clean-up: nothing carries forward).
-LEAVE_CARRY_EXEMPT_DEPARTMENTS = env.list("LEAVE_CARRY_EXEMPT_DEPARTMENTS", default=[])
-# Cap for those departments; empty means no limit.
+# Annual Leave carry-over rules (leave/accrual.py); defaults are HR's
+# decisions of 2026-10-15.
+# Days of unused Annual Leave carried into the next year.
+LEAVE_CARRY_CAP = env("LEAVE_CARRY_CAP", default="10")
+# Department names (comma-separated) with their own cap and expiry rule
+# (packing, picking and private label). A name not in the database refuses
+# every accrual run.
+LEAVE_CARRY_EXEMPT_DEPARTMENTS = env.list(
+    "LEAVE_CARRY_EXEMPT_DEPARTMENTS",
+    default=["Packing", "Packing and Picking", "Private Label"],
+)
+# Cap for those departments; empty means no limit (HR has not agreed one yet).
 LEAVE_CARRY_EXEMPT_CAP = env("LEAVE_CARRY_EXEMPT_CAP", default="")
 # Unused carried days lapse when June is credited ("use by 30 June").
-LEAVE_CARRY_EXPIRES_30_JUNE = env.bool("LEAVE_CARRY_EXPIRES_30_JUNE", default=False)
+LEAVE_CARRY_EXPIRES_30_JUNE = env.bool("LEAVE_CARRY_EXPIRES_30_JUNE", default=True)
 # Whether the exempt departments also skip that 30 June expiry.
 LEAVE_CARRY_EXEMPT_SKIP_EXPIRY = env.bool(
-    "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", default=False
+    "LEAVE_CARRY_EXEMPT_SKIP_EXPIRY", default=True
 )
 # Leave allocations created from this date (Africa/Nairobi, YYYY-MM-DD) are
 # real grants: the Annual Leave rebuild adds them. Earlier ones are converted

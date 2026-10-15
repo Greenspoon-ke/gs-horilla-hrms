@@ -1,9 +1,11 @@
 """
 Data settings for HR's 2026 leave clean-up. Dry run unless --apply.
 
-1. Annual Leave: reset=False and "no carryforward" (accrue_leave refuses to
-   run otherwise). Saved through LeaveType.save, which clears the carry-forward
-   expiry date, so the 20-second leave_reset job no longer touches the type.
+1. Annual Leave: reset=False and "carryforward" (accrue_leave refuses to run
+   otherwise; leave.accrual.set_accrual_type). Saved through LeaveType.save,
+   which clears the carry-forward expiry date, so the 20-second leave_reset
+   job no longer touches the type; the cap and the 30 June expiry are applied
+   by accrue_leave from the LEAVE_CARRY_* settings.
 2. Group "HR – Leave" with view/add/change leave allocation requests and
    view/change available leave.
 3. --members: user ids to put in the group. The group's permissions are then
@@ -22,9 +24,8 @@ from django.contrib.auth.models import Group, Permission, User
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from leave.accrual import ACCRUAL_LEAVE_TYPE_NAME, REQUIRED_CARRY_TYPE
+from leave.accrual import AccrualRefused, find_accrual_type, set_accrual_type
 from leave.methods import HR_LEAVE_GROUP
-from leave.models import LeaveType
 
 GROUP_PERMISSIONS = [
     "view_leaveallocationrequest",
@@ -56,12 +57,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         apply = options["apply"]
         member_ids = parse_ids(options["members"])
-        types = list(LeaveType._base_manager.filter(name=ACCRUAL_LEAVE_TYPE_NAME))
-        if len(types) != 1:
-            raise CommandError(
-                f'Expected one leave type named "{ACCRUAL_LEAVE_TYPE_NAME}", '
-                f"found {len(types)}."
-            )
+        try:
+            annual = find_accrual_type()
+        except AccrualRefused as error:
+            raise CommandError(str(error)) from None
         members = list(User.objects.filter(pk__in=member_ids, is_active=True))
         missing = sorted(set(member_ids) - {user.pk for user in members})
         if missing:
@@ -77,7 +76,7 @@ class Command(BaseCommand):
         write = self.stdout.write
         write(f"{'APPLY' if apply else 'DRY RUN (database unchanged)'}: leave clean-up")
         with transaction.atomic():
-            changes = self.leave_type(types[0], write)
+            changes = self.leave_type(annual, write)
             changes += self.group(permissions, members, write)
             if not apply:
                 transaction.set_rollback(True)
@@ -92,11 +91,9 @@ class Command(BaseCommand):
             )
 
         before = describe()
-        if not leave_type.reset and leave_type.carryforward_type == REQUIRED_CARRY_TYPE:
+        if not set_accrual_type(leave_type):
             write(f"  leave type {leave_type.pk}: already set")
             return 0
-        leave_type.reset = False
-        leave_type.carryforward_type = REQUIRED_CARRY_TYPE
         leave_type.save()  # also clears carryforward_expire_date
         write(f"  leave type {leave_type.pk}: {before} -> {describe()}")
         return 1
