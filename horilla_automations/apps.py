@@ -49,6 +49,12 @@ class HorillaAutomationConfig(AppConfig):
                 "compilemessages",
                 "flush",
                 "shell",
+                # Leave clean-up data commands: no automated mail while they
+                # write (horilla_automations would otherwise connect here).
+                "convert_leave_allocations",
+                "leave_cleanup_setup",
+                "record_hr_leave",
+                "leave_cleanup_preview",
             ]
         ):
             from horilla_automations.signals import start_automation

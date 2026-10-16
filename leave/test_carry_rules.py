@@ -1,7 +1,7 @@
 """
-Tests for the carry-over rules: exempt teams' year-end cap, the optional
-30 June expiry, booking against exempt carry, API approvals spending carry
-first, and the reset job's connection cleanup.
+Tests for the carry-over rules: the year-end cap, exempt teams' cap, the
+30 June expiry, HR's restored 2026 carry, booking against carry, API
+approvals spending carry first, and the reset job's connection cleanup.
 
 Synthetic data only. The test runner never touches the real database.
 """
@@ -49,13 +49,13 @@ class CarryRulesTestCase(AccrualTestCase):
 
 
 class ExemptTeamCapTests(CarryRulesTestCase):
-    def test_off_by_default_everyone_is_capped_at_10(self):
+    def test_without_exempt_departments_everyone_is_capped_at_10(self):
         row = self.year_end_row("GSL001", self.packing, 15)
         self.daily(date(2027, 1, 2))
-        self.assertEqual(self.values(row)[1], 10)
+        self.assertEqual(self.values(row)[:2], (0, 10))
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
-    def test_exempt_team_keeps_every_day_other_teams_keep_10(self):
+    def test_exempt_team_has_no_cap_other_teams_keep_10(self):
         packer = self.year_end_row("GSL001", self.packing, 15)
         finance = self.year_end_row("GSL002", self.finance, 15)
         self.daily(date(2027, 1, 2))
@@ -85,7 +85,10 @@ class ExemptTeamCapTests(CarryRulesTestCase):
         for settings in [
             {"LEAVE_CARRY_EXEMPT_DEPARTMENTS": ["Packng"]},
             {"LEAVE_CARRY_EXEMPT_CAP": "five"},
-            {"LEAVE_CARRY_EXEMPT_CAP": "5"},
+            {"LEAVE_CARRY_EXEMPT_CAP": "-1"},
+            {"LEAVE_CARRY_EXEMPT_CAP": "5"},  # below the standard cap
+            {"LEAVE_CARRY_CAP": "ten"},
+            {"LEAVE_CARRY_CAP": "-1"},
         ]:
             with self.subTest(settings=settings), override_settings(**settings):
                 with self.assertRaises(AccrualRefused):
@@ -94,19 +97,16 @@ class ExemptTeamCapTests(CarryRulesTestCase):
                     self.daily(date(2027, 1, 2))
 
 
+@override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
 class June30ExpiryTests(CarryRulesTestCase):
-    def june_row(self, department):
+    """Defaults (HR, 2026-10-15): carry lapses on 30 June except for exempt teams."""
+
+    def june_row(self, department, code="GSL001"):
         employee = self.in_department(
-            self.employee("GSL001", date(2025, 3, 3)), department
+            self.employee(code, date(2025, 3, 3)), department
         )
         return self.balance(employee, 3, 4, marker=date(2026, 6, 1))
 
-    def test_off_by_default_carry_stays(self):
-        row = self.june_row(self.finance)
-        self.daily(date(2026, 7, 2))
-        self.assertEqual(self.values(row), (5, 4, date(2026, 7, 1)))
-
-    @override_settings(LEAVE_CARRY_EXPIRES_30_JUNE=True)
     def test_unused_carry_lapses_when_june_is_credited(self):
         row = self.june_row(self.finance)
         result = self.daily(date(2026, 7, 2))
@@ -115,21 +115,71 @@ class June30ExpiryTests(CarryRulesTestCase):
         latest = row.history_set.order_by("-history_date").first()
         self.assertIn("carry 4 expired 30 Jun", latest.history_change_reason)
 
-    @override_settings(LEAVE_CARRY_EXPIRES_30_JUNE=True)
+    def test_expiry_happens_once(self):
+        row = self.june_row(self.finance)
+        self.daily(date(2026, 7, 2))
+        again = self.daily(date(2026, 7, 2))
+        self.assertEqual(again["saved"], [])
+        later = self.daily(date(2026, 8, 3))  # July: no second expiry
+        self.assertNotIn("CARRY_EXPIRED", later["plans"][0].flags)
+        self.assertEqual(self.values(row), (7, 0, date(2026, 8, 1)))
+
     def test_nothing_lapses_before_june_is_credited(self):
         row = self.june_row(self.finance)
         self.daily(date(2026, 6, 30))
         self.assertEqual(self.values(row), (3, 4, date(2026, 6, 1)))
 
-    @override_settings(
-        LEAVE_CARRY_EXPIRES_30_JUNE=True,
-        LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS,
-        LEAVE_CARRY_EXEMPT_SKIP_EXPIRY=True,
-    )
-    def test_exempt_team_can_skip_the_expiry(self):
+    def test_exempt_team_keeps_its_carry(self):
+        packer = self.june_row(self.packing)
+        finance = self.june_row(self.finance, "GSL002")
+        self.daily(date(2026, 7, 2))
+        self.assertEqual(self.values(packer), (5, 4, date(2026, 7, 1)))
+        self.assertEqual(self.values(finance), (5, 0, date(2026, 7, 1)))
+
+    @override_settings(LEAVE_CARRY_EXEMPT_SKIP_EXPIRY=False)
+    def test_exempt_team_expires_too_when_the_setting_is_off(self):
         row = self.june_row(self.packing)
         self.daily(date(2026, 7, 2))
+        self.assertEqual(self.values(row), (5, 0, date(2026, 7, 1)))
+
+    @override_settings(LEAVE_CARRY_EXPIRES_30_JUNE=False)
+    def test_expiry_can_be_switched_off(self):
+        row = self.june_row(self.finance)
+        self.daily(date(2026, 7, 2))
         self.assertEqual(self.values(row), (5, 4, date(2026, 7, 1)))
+
+
+@override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
+class RestoredCarryTests(CarryRulesTestCase):
+    """HR restores 2026 carry: spent first, then lapses on 30 June 2027."""
+
+    def restored(self, code, department, opening, taken):
+        employee = self.in_department(self.employee(code, date(2024, 3, 4)), department)
+        row = self.balance(employee, 24, 0, assigned=date(2025, 1, 2))
+        self.approved(employee, date(2026, 11, 2), taken)
+        return row
+
+    def test_restored_carry_lapses_30_june_2027_except_for_exempt_teams(self):
+        finance = self.restored("GSL001", self.finance, 6, 2)
+        packer = self.restored("GSL002", self.packing, 6, 2)
+        carry = {"GSL001": 6, "GSL002": 6}
+        self.apply_rebuild({"GSL999": date(2026, 6, 1)}, opening_carry=carry)
+        # 9 months accrued (18), 2 taken from the carry first.
+        self.assertEqual(self.values(finance), (18, 4, date(2026, 10, 1)))
+        self.daily(date(2027, 1, 2))  # Oct-Dec credited, 2026 closed
+        self.assertEqual(self.values(finance), (0, 10, date(2027, 1, 1)))
+        self.assertEqual(self.values(packer), (0, 28, date(2027, 1, 1)))
+        self.daily(date(2027, 7, 2))  # January-June 2027, then the expiry
+        self.assertEqual(self.values(finance), (12, 0, date(2027, 7, 1)))
+        self.assertEqual(self.values(packer), (12, 28, date(2027, 7, 1)))
+
+    def test_rebuild_and_daily_reruns_change_nothing(self):
+        self.restored("GSL001", self.finance, 6, 2)
+        carry = {"GSL001": 6}
+        self.apply_rebuild({"GSL999": date(2026, 6, 1)}, opening_carry=carry)
+        again = self.rebuild({"GSL999": date(2026, 6, 1)}, opening_carry=carry)
+        self.assertEqual([plan.action for plan in again["plans"]], ["unchanged"])
+        self.assertEqual(self.daily(date(2026, 10, 15))["saved"], [])
 
 
 class BookingCapTests(CarryRulesTestCase):
@@ -139,7 +189,7 @@ class BookingCapTests(CarryRulesTestCase):
         )
         return self.balance(employee, 2, carry, marker=date(2026, 10, 1))
 
-    def test_type_cap_by_default(self):
+    def test_standard_cap_by_default(self):
         self.assertEqual(booking_carry_cap(self.accrual_row(self.packing, 14)), 10)
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
@@ -148,7 +198,7 @@ class BookingCapTests(CarryRulesTestCase):
         self.assertGreaterEqual(booking_carry_cap(row), 14)
 
     @override_settings(LEAVE_CARRY_EXEMPT_DEPARTMENTS=TEAMS)
-    def test_other_teams_and_rows_off_accrual_keep_the_type_cap(self):
+    def test_other_teams_and_rows_off_accrual_keep_the_standard_cap(self):
         self.assertEqual(booking_carry_cap(self.accrual_row(self.finance, 4)), 10)
         employee = self.in_department(
             self.employee("GSL002", date(2025, 3, 3)), self.packing

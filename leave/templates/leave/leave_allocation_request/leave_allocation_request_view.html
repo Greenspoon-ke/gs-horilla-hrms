@@ -225,6 +225,13 @@
 	</div>
 </section>
 
+<!-- Guide text sits outside #view-container so filtering does not remove it. -->
+<div class="oh-wrapper">
+	<div class="oh-alert oh-alert--info mb-3" style="opacity: 1">
+		{% trans "Taking time off? Use Leave → My Leave Requests. This page is only for granting extra days." %}
+	</div>
+</div>
+
 <!-- start of request view  -->
 <div class="oh-wrapper" id="userRequest">
 	{% if leave_allocation_requests or my_leave_allocation_requests %}

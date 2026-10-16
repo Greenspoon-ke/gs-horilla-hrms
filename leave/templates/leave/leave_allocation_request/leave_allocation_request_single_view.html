@@ -174,7 +174,9 @@
                     {% if perms.leave.change_leaveallocationrequest or request.user|is_reportingmanager %}
                         {% if leave_allocation_request.status == 'requested' %}
                             <a
-                                href="{% url 'leave-allocation-request-approve' leave_allocation_request.id %}"
+                                hx-post="{% url 'leave-allocation-request-approve' leave_allocation_request.id %}"
+                                hx-confirm="{% trans 'Do you want to approve this request?' %}"
+                                hx-target="this" hx-swap="outerHTML"
                                 class="oh-btn oh-btn--success w-100"
                                 title="{% trans 'Approve' %}"                        >
                                 <ion-icon class="me-1 " name="checkmark-outline"></ion-icon>

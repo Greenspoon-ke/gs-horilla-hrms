@@ -1,4 +1,5 @@
 import calendar
+import contextlib
 from datetime import datetime, timedelta
 
 from django.apps import apps
@@ -158,3 +159,144 @@ def filter_conditional_leave_request(request):
         else:
             leave_request_ids.append(instance.leave_request_id.id)
     return LeaveRequest.objects.filter(pk__in=leave_request_ids)
+
+
+# Group that holds HR's leave-allocation permissions. Its members are told
+# when a manager grants days directly (HR decision Q7).
+HR_LEAVE_GROUP = "HR – Leave"
+
+
+def can_use_allocations(user):
+    """
+    The allocation page is for HR (the view permission) and reporting
+    managers only; staff take time off through leave requests.
+    """
+    from base.templatetags.basefilters import is_reportingmanager
+
+    return user.has_perm("leave.view_leaveallocationrequest") or is_reportingmanager(
+        user
+    )
+
+
+def can_act_on(user, instance, perm):
+    """
+    Object-level check for one leave request or allocation (audit S1): the
+    permission holder, this employee's own reporting manager, or one of this
+    leave request's conditional approvers. Being a manager of someone else is
+    not enough.
+    """
+    from base.methods import check_manager
+
+    if user.has_perm(perm):
+        return True
+    employee = getattr(user, "employee_get", None)
+    if employee is None:
+        return False
+    if check_manager(employee, instance):
+        return True
+    multiple_approvals = getattr(instance, "multiple_approvals", None)
+    if multiple_approvals is None:
+        return False
+    conditions = multiple_approvals()
+    return bool(conditions) and employee in conditions["managers"]
+
+
+def can_grant_directly(user, employee):
+    """
+    A manager's or HR's allocation for someone else applies at once; nobody
+    grants days to themselves without a second person approving.
+    """
+    from base.methods import check_manager
+
+    me = getattr(user, "employee_get", None)
+    if me is None or me == employee:
+        return False
+    return user.has_perm("leave.add_leaveallocationrequest") or check_manager(
+        me, employee
+    )
+
+
+def approve_allocation(allocation):
+    """
+    Grant an allocation's days: the single place this happens (web approve,
+    API approve, and direct grants on create). Adds requested_days to the
+    employee's balance, creating the row if missing, and marks it approved.
+    Returns False and changes nothing unless the allocation is still requested,
+    so a double click or a retried request cannot grant twice.
+    """
+    from django.db import transaction
+
+    from leave.accrual import prepare_new_balance
+    from leave.models import AvailableLeave, LeaveAllocationRequest
+
+    with transaction.atomic():
+        # _base_manager: the company manager's distinct() cannot be locked.
+        allocation = LeaveAllocationRequest._base_manager.select_for_update().get(
+            pk=allocation.pk
+        )
+        if allocation.status != "requested":
+            return False
+        available_leave = AvailableLeave.objects.filter(
+            employee_id=allocation.employee_id,
+            leave_type_id=allocation.leave_type_id,
+        ).first() or prepare_new_balance(
+            AvailableLeave(
+                employee_id=allocation.employee_id,
+                leave_type_id=allocation.leave_type_id,
+            )
+        )
+        available_leave.available_days += allocation.requested_days
+        available_leave.save()
+        allocation.status = "approved"
+        allocation.save()
+    return True
+
+
+def revoke_allocation(allocation):
+    """
+    Take an approved allocation's days back off the balance. No floor at 0:
+    a balance already in debt must stay correct (HR decision 3).
+    """
+    from leave.models import AvailableLeave
+
+    available_leave = AvailableLeave.objects.filter(
+        leave_type_id=allocation.leave_type_id,
+        employee_id=allocation.employee_id,
+    ).first()
+    if available_leave is not None:
+        available_leave.available_days -= allocation.requested_days
+        available_leave.save()
+
+
+def notify_direct_grant(actor, allocation):
+    """Tell the employee, and HR (HR decision Q7), that days were granted."""
+    from django.contrib.auth.models import User
+    from django.urls import reverse
+
+    from notifications.signals import notify
+
+    redirect = reverse("leave-allocation-request-view") + f"?id={allocation.id}"
+    with contextlib.suppress(Exception):
+        notify.send(
+            actor,
+            recipient=allocation.employee_id.employee_user_id,
+            verb="Your leave allocation request has been approved",
+            verb_ar="تمت الموافقة على طلب تخصيص إجازتك",
+            verb_de="Ihr Antrag auf Urlaubszuweisung wurde genehmigt",
+            verb_es="Se ha aprobado su solicitud de asignación de vacaciones",
+            verb_fr="Votre demande d'allocation de congé a été approuvée",
+            icon="people-circle",
+            redirect=redirect,
+        )
+    hr_users = User.objects.filter(groups__name=HR_LEAVE_GROUP, is_active=True)
+    hr_users = hr_users.exclude(pk=getattr(actor.employee_user_id, "pk", None))
+    if hr_users.exists():
+        with contextlib.suppress(Exception):
+            notify.send(
+                actor,
+                recipient=list(hr_users),
+                verb=f"{allocation.requested_days:g} day(s) of "
+                f"{allocation.leave_type_id} granted to {allocation.employee_id}.",
+                icon="people-circle",
+                redirect=redirect,
+            )

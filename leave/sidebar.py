@@ -7,6 +7,7 @@ from django.urls import reverse
 from django.utils.translation import gettext_lazy as trans
 
 from base.templatetags.basefilters import is_leave_approval_manager, is_reportingmanager
+from leave.methods import can_use_allocations
 from leave.templatetags.leavefilters import is_compensatory
 
 MENU = trans("Leave")
@@ -40,6 +41,7 @@ SUBMENUS = [
     {
         "menu": trans("Leave Allocation Request"),
         "redirect": reverse("leave-allocation-request-view"),
+        "accessibility": "leave.sidebar.allocation_accessibility",
     },
     {
         "menu": trans("Holidays"),
@@ -83,6 +85,12 @@ def assign_accessibility(request, submenu, user_perm, *args, **kwargs):
     return request.user.has_perm("leave.view_availableleave") or is_reportingmanager(
         request.user
     )
+
+
+def allocation_accessibility(request, submenu, user_perms, *args, **kwargs):
+    # Staff take time off through leave requests; only HR and managers grant
+    # extra days (HR decision 4).
+    return can_use_allocations(request.user)
 
 
 def holiday_accessibility(request, submenu, user_perms, *args, **kwargs):
