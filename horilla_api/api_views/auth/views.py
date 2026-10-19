@@ -1,4 +1,5 @@
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -9,9 +10,15 @@ from ...api_serializers.auth.serializers import GetEmployeeSerializer
 class LoginAPIView(APIView):
     def post(self, request):
         if "username" and "password" in request.data.keys():
-            username = request.data.get("username")
+            username = str(request.data.get("username") or "").strip()
             password = request.data.get("password")
-            user = authenticate(username=username, password=password)
+            # Same as the web login: ModelBackend matches username exactly,
+            # so resolve the stored username case-insensitively first.
+            user_object = User.objects.filter(username__iexact=username).first()
+            user = authenticate(
+                username=user_object.username if user_object else username,
+                password=password,
+            )
             if user:
                 refresh = RefreshToken.for_user(user)
                 employee = user.employee_get

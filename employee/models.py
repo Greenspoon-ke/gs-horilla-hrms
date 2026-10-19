@@ -48,6 +48,19 @@ def reporting_manager_validator(value):
     return value
 
 
+def login_username(value):
+    """
+    The form a login username/email is stored in: trimmed and lowercased.
+
+    Usernames are email addresses, and people type them in whatever case
+    their keyboard or phone gives them. Storing one form keeps login and
+    password reset (which match with iexact) from finding two accounts for
+    the same address. Every write to auth_user.username/email for an
+    employee goes through this.
+    """
+    return (value or "").strip().lower()
+
+
 class Employee(models.Model):
     """
     Employee model
@@ -527,7 +540,7 @@ class Employee(models.Model):
 
         if employee.employee_user_id is None:
             # Create user if no corresponding user exists
-            username = self.email
+            username = login_username(self.email)
             password = self.phone
 
             is_new_employee_flag = (
@@ -563,8 +576,8 @@ class Employee(models.Model):
             # when the employee's email is edited, so login and
             # password reset keep working against the current address.
             user = employee.employee_user_id
-            user.username = self.email
-            user.email = self.email
+            user.username = login_username(self.email)
+            user.email = login_username(self.email)
             user.save(update_fields=["username", "email"])
 
         if not hasattr(self, "employee_work_info"):

@@ -70,7 +70,7 @@ from base.models import (
 )
 from employee.filters import EmployeeFilter
 from employee.forms import MultipleFileField
-from employee.models import Employee
+from employee.models import Employee, login_username
 from horilla import horilla_middlewares
 from horilla.horilla_middlewares import _thread_locals
 from horilla.methods import get_horilla_model_class
@@ -1975,9 +1975,19 @@ class ChangeUsernameForm(forms.Form):
         self.user = user
         super(ChangeUsernameForm, self).__init__(*args, **kwargs)
 
+    def clean_username(self):
+        return login_username(self.cleaned_data.get("username"))
+
     def clean_password(self):
         username = self.cleaned_data.get("username")
-        if User.objects.filter(username=username).exists():
+        # Login and password reset match usernames with iexact, so a
+        # username differing from another account only in case would let
+        # one account shadow the other.
+        if (
+            User.objects.filter(username__iexact=username)
+            .exclude(pk=self.user.pk)
+            .exists()
+        ):
             raise forms.ValidationError("Username already exists.")
         password = self.cleaned_data.get("password")
         if not self.user.check_password(password):
@@ -2573,7 +2583,9 @@ class PassWordResetForm(forms.Form):
         user.
         """
         username = self.cleaned_data["email"]
-        user = User.objects.get(username=username)
+        # Must find the same account the reset views matched (iexact), or
+        # a differently-cased address passes the view and fails here.
+        user = User.objects.filter(username__iexact=username).first()
         employee = user.employee_get
         email = employee.email
         work_mail = None
