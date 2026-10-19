@@ -3,7 +3,7 @@
 The **Test and deploy** workflow (`.github/workflows/deploy.yml`) is started by hand: **Actions → Test and deploy → Run workflow**.
 
 - **Use workflow from:** pick a branch.
-  - Any branch: the leave tests run.
+  - Any branch: the leave tests and the login email case tests run.
   - `1.0`, with **deploy** ticked: the tested commit is also deployed to production.
 - **backup:** take a database backup to S3 first. The default is yes.
 - **migrate_apps:** the apps to migrate, comma-separated, for example `leave`. Leave it empty when no migration is needed.
@@ -92,7 +92,7 @@ The server side is `deploy/hrms-deploy.sh`, installed as `/home/ubuntu/bin/hrms-
 
 ```
 DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py migrate --run-syncdb
-DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py test leave --keepdb
+DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py test leave base.test_login_email_case --keepdb
 ```
 
 `horilla/settings_test.py` builds the tables from the models instead of migrations, and switches Sentry off.
