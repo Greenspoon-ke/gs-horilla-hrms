@@ -48,6 +48,7 @@ from employee.models import (
     NoteFiles,
     Policy,
     PolicyMultipleFile,
+    login_username,
 )
 from horilla import horilla_middlewares
 from horilla_audit.models import AccountBlockUnblock
@@ -219,17 +220,29 @@ class EmployeeForm(ModelForm):
 
             raise forms.ValidationError({"email": error_message})
 
-        if self.instance and self.instance.pk and self.instance.employee_user_id:
-            if self.instance.email != email and User.objects.filter(
-                username=email
-            ).exclude(pk=self.instance.employee_user_id_id).exists():
-                raise forms.ValidationError(
-                    {
-                        "email": _(
-                            "This email is already used as a login username by another user."
-                        )
-                    }
-                )
+        # Saving creates a login account (no linked user yet) or renames the
+        # linked one (email changed). Either way the new username must not
+        # match another account in any case, or login and password reset
+        # (which match with iexact) would see two accounts for one address.
+        login = login_username(email)
+        linked_user_id = self.instance.employee_user_id_id if self.instance else None
+        writes_username = not linked_user_id or login != login_username(
+            self.instance.email
+        )
+        if (
+            login
+            and writes_username
+            and User.objects.filter(username__iexact=login)
+            .exclude(pk=linked_user_id)
+            .exists()
+        ):
+            raise forms.ValidationError(
+                {
+                    "email": _(
+                        "This email is already used as a login username by another user."
+                    )
+                }
+            )
 
     def save(self, commit=True):
         old_email = self.instance.email if self.instance.pk else None
@@ -241,8 +254,8 @@ class EmployeeForm(ModelForm):
             and employee.employee_user_id
         ):
             user = employee.employee_user_id
-            user.username = employee.email
-            user.email = employee.email
+            user.username = login_username(employee.email)
+            user.email = login_username(employee.email)
             user.save(update_fields=["username", "email"])
             if hasattr(employee, "employee_work_info"):
                 work_info = employee.employee_work_info

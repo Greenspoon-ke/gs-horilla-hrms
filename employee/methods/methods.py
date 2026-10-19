@@ -12,6 +12,7 @@ import pandas as pd
 from django.apps import apps
 from django.contrib.auth.models import User
 from django.db import connection, models, transaction
+from django.db.models.functions import Lower
 from django.utils.translation import gettext as _
 
 from base.context_processors import get_initial_prefix
@@ -24,7 +25,7 @@ from base.models import (
     JobRole,
     WorkType,
 )
-from employee.models import Employee, EmployeeWorkInformation
+from employee.models import Employee, EmployeeWorkInformation, login_username
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +293,13 @@ def process_employee_records(data_frame):
         for emp in Employee.objects.entire().only("id", "badge_id", "email")
     }
     existing_badge_ids = frozenset(existing_by_badge.keys())
-    existing_usernames = frozenset(User.objects.values_list("username", flat=True))
+    # Lowercased to compare with the row email (also lowercased below), so an
+    # existing "Name@x.com" account blocks importing "name@x.com" as a second one.
+    existing_usernames = frozenset(
+        username.lower()
+        for username in User.objects.values_list("username", flat=True)
+        if username
+    )
     existing_name_emails = frozenset(
         (fname, lname, email)
         for fname, lname, email in Employee.objects.values_list(
@@ -496,15 +503,16 @@ def bulk_create_user_import(success_lists):
     Returns:
         list: A list of created User instances. If no new users are created, returns an empty list.
     """
-    emails = [row["Email"] for row in success_lists]
+    emails = [login_username(row["Email"]) for row in success_lists]
+    # Match existing accounts in any case so a differently-cased address
+    # never gets a second login account.
+    users = User.objects.annotate(login=Lower("username"))
     existing_usernames = (
-        set(User.objects.filter(username__in=emails).values_list("username", flat=True))
+        set(users.filter(login__in=emails).values_list("login", flat=True))
         if is_postgres
         else set(
             chain.from_iterable(
-                User.objects.filter(username__in=chunk).values_list(
-                    "username", flat=True
-                )
+                users.filter(login__in=chunk).values_list("login", flat=True)
                 for chunk in chunked(emails, 999)
             )
         )
@@ -512,13 +520,13 @@ def bulk_create_user_import(success_lists):
 
     users_to_create = [
         User(
-            username=row["Email"],
-            email=row["Email"],
+            username=login_username(row["Email"]),
+            email=login_username(row["Email"]),
             password=str(row.get("Phone") or "").strip() or row["Email"],
             is_superuser=False,
         )
         for row in success_lists
-        if row["Email"] not in existing_usernames
+        if login_username(row["Email"]) not in existing_usernames
     ]
 
     created_users = []

@@ -669,7 +669,9 @@ class HorillaPasswordResetView(PasswordResetView):
             return redirect("forgot-password")
 
         username = form.cleaned_data["email"]
-        user = User.objects.filter(username=username).first()
+        # Case-insensitive like login_user: people type their address in
+        # whatever case their keyboard gives them.
+        user = User.objects.filter(username__iexact=username).first()
         if user:
             opts = {
                 "use_https": self.request.is_secure(),
@@ -715,7 +717,7 @@ class EmployeePasswordResetView(PasswordResetView):
                 return HttpResponseRedirect(self.request.META.get("HTTP_REFERER", "/"))
 
             username = form.cleaned_data["email"]
-            user = User.objects.filter(username=username).first()
+            user = User.objects.filter(username__iexact=username).first()
             if user:
                 opts = {
                     "use_https": self.request.is_secure(),

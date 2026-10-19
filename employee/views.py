@@ -107,6 +107,7 @@ from employee.models import (
     EmployeeTag,
     EmployeeWorkInformation,
     NoteFiles,
+    login_username,
 )
 from horilla.decorators import (
     hx_request_required,
@@ -2421,9 +2422,9 @@ def employee_import(request):
         for employee_dict in employee_dicts:
             try:
                 phone = employee_dict["phone"]
-                email = employee_dict["email"]
+                email = login_username(employee_dict["email"])
                 employee_full_name = employee_dict["employee_full_name"]
-                existing_user = User.objects.filter(username=email).first()
+                existing_user = User.objects.filter(username__iexact=email).first()
                 if existing_user is None:
                     employee_first_name = employee_full_name
                     employee_last_name = ""
