@@ -19,7 +19,7 @@
       <div class="oh-modal__dialog-body">
         <form
           method="post"
-          action="/{{export_path}}"
+          action="{{ export_path }}"
           onsubmit="
             const selectedFields = $('#{{view_id|safe}} input[name=selected_fields]:checked').map(function() {
                 return [[$(this).attr('data-label'),this.value]];
@@ -31,6 +31,7 @@
           id="candidateExportForm"
         >
         {% csrf_token %}
+        <input type="hidden" name="export_list_view" value="1">
         <input type="hidden" name="ids" id="{{view_id}}ExportIds">
         <input type="hidden" name="columns" id="{{view_id}}ExportColumns">
 
