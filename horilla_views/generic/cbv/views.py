@@ -19,7 +19,14 @@ from django.core.paginator import Page
 from django.db import transaction
 from django.db.models import CharField, F
 from django.db.models.functions import Cast
-from django.http import HttpRequest, HttpResponse, JsonResponse, QueryDict
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBadRequest,
+    HttpResponseForbidden,
+    JsonResponse,
+    QueryDict,
+)
 from django.shortcuts import render
 from django.template.loader import render_to_string
 from django.urls import resolve, reverse
@@ -53,7 +60,6 @@ from horilla_views.templatetags.generic_template_filters import getattribute
 logger = logging.getLogger(__name__)
 
 
-@method_decorator(hx_request_required, name="dispatch")
 class HorillaListView(ListView):
     """
     HorillaListView
@@ -159,6 +165,20 @@ class HorillaListView(ListView):
         """
         return self.get(self, *args, **kwargs)
 
+    # Hidden field that marks the quick-export POST (generic/export_fields_modal.html).
+    EXPORT_FLAG = "export_list_view"
+
+    def dispatch(self, request, *args, **kwargs):
+        """
+        The quick export is a plain form POST (a file download, so not HTMX) to
+        this list's own URL. Subclass and URL decorators (login, permissions)
+        wrap this method, so they have already run. Everything else keeps the
+        HTMX-only rule the class decorator used to apply.
+        """
+        if request.method == "POST" and request.POST.get(self.EXPORT_FLAG) == "1":
+            return self.export_data(request)
+        return hx_request_required(super().dispatch)(request, *args, **kwargs)
+
     def __init__(self, **kwargs: Any) -> None:
         if not self.view_id:
             self.view_id = get_short_uuid(4)
@@ -231,6 +251,13 @@ class HorillaListView(ListView):
         return self.request.user.has_perm(
             f"{self.model._meta.app_label}.add_{self.model.__name__.lower()}"
         )
+
+    def export_accessibility(self) -> bool:
+        """
+        Accessibility method for quick export. The list's own login and
+        permission decorators have already run; subclasses may narrow it.
+        """
+        return self.request.user.is_authenticated
 
     def serve_bulk_form(self, request: HttpRequest) -> HttpResponse:
         """
@@ -1168,10 +1195,8 @@ class HorillaListView(ListView):
         # CACHE.get(self.request.session.session_key + "cbv")[HorillaListView] = context
         from horilla.urls import path, urlpatterns
 
-        self.export_path = f"export-list-view-{get_short_uuid(4)}/"
-
-        urlpatterns.append(path(self.export_path, self.export_data))
-        context["export_path"] = self.export_path
+        # Export posts back to this same URL; dispatch() serves it.
+        context["export_path"] = self.request.get_full_path()
 
         if self.import_fields:
             get_import_sheet_path = (
@@ -1228,19 +1253,56 @@ class HorillaListView(ListView):
         """
         return json.dumps(list(self.get_queryset().values_list("id", flat=True)))
 
-    def export_data(self, *args, **kwargs):
+    def export_data(self, request, *args, **kwargs):
         """
         Export list view visible columns
         """
         from import_export import fields, resources
 
-        request = getattr(_thread_locals, "request", None)
-        ids = eval_validate(request.POST["ids"])
-        _columns = eval_validate(request.POST["columns"])
+        if not (self.quick_export and self.export_accessibility()):
+            # A response, not raise PermissionDenied: horilla's login_required
+            # swallows exceptions (went_wrong.html, or a second run in DEBUG).
+            return HttpResponseForbidden("Export not allowed")
+        try:
+            ids = eval_validate(request.POST["ids"])
+            requested = [
+                (label, name) for label, name in eval_validate(request.POST["columns"])
+            ]
+            queryset = self.model.objects.filter(id__in=ids)
+        except (KeyError, ValueError, TypeError, SyntaxError, RecursionError):
+            return HttpResponseBadRequest("Invalid export request")
+        # Only columns this view declares; never compiled, never free attribute paths.
+        allowed = {c if isinstance(c, str) else c[1] for c in self.columns}
+        allowed |= {c[1] for c in self.export_fields}
+        _columns = [
+            (label, name)
+            for label, name in requested
+            if isinstance(label, str)
+            and isinstance(name, str)
+            and name.isidentifier()
+            and name in allowed
+        ]
+        if len(_columns) != len(requested):
+            # Count and view only: the rejected names are attacker-controlled text.
+            logger.warning(
+                "List export ignored %d unknown column(s) on %s",
+                len(requested) - len(_columns),
+                type(self).__name__,
+            )
         export_format = request.POST.get("format", "xlsx")
-        queryset = self.model.objects.filter(id__in=ids)
 
         _model = self.model
+
+        def make_dehydrate(field_tuple):
+            # Closure instead of exec(): the column name stays data, never code.
+            field_name = field_tuple[1]
+
+            def dehydrate(self, instance):
+                return self.remove_extra_spaces(
+                    getattribute(instance, field_name), field_tuple
+                )
+
+            return dehydrate
 
         class HorillaListViewResorce(resources.ModelResource):
             """
@@ -1264,9 +1326,7 @@ class HorillaListView(ListView):
                 return instance.pk
 
             for field_tuple in _columns:
-                dynamic_fn_str = f"def dehydrate_{field_tuple[1]}(self, instance):return self.remove_extra_spaces(getattribute(instance, '{field_tuple[1]}'),{field_tuple})"
-                exec(dynamic_fn_str)
-                dynamic_fn = locals()[f"dehydrate_{field_tuple[1]}"]
+                locals()[f"dehydrate_{field_tuple[1]}"] = make_dehydrate(field_tuple)
                 locals()[field_tuple[1]] = fields.Field(column_name=field_tuple[0])
 
             def remove_extra_spaces(self, text, field_tuple):
