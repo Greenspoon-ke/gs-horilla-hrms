@@ -18,6 +18,7 @@ from django.contrib.sessions.backends.db import SessionStore
 from django.test import RequestFactory, TestCase
 from openpyxl import load_workbook
 
+from employee.models import Employee
 from horilla.horilla_middlewares import _thread_locals
 from horilla_views.generic.cbv.views import HorillaListView
 from leave.tests import add_missing_user_column
@@ -66,6 +67,19 @@ class GroupExportList(HorillaListView):
     export_fields = []
 
 
+def make_login(label, superuser=False):
+    """A login with its Employee, as every real user has; menus read it."""
+    create = User.objects.create_superuser if superuser else User.objects.create_user
+    user = create(username=label, password=PASSWORD)
+    employee = Employee.objects.create(
+        employee_user_id=user,
+        employee_first_name=label,
+        email=f"{label}@example.invalid",
+        phone="0700000000",
+    )
+    return user, employee
+
+
 def xlsx_rows(response):
     """Sheet title and cell values; the file bytes carry a fresh timestamp."""
     sheet = load_workbook(io.BytesIO(response.content)).active
@@ -82,7 +96,7 @@ class ExportTestCase(TestCase):
         # ThreadLocalMiddleware never clears the request; reset it per test.
         _thread_locals.request = None
         self.addCleanup(setattr, _thread_locals, "request", None)
-        self.user = User.objects.create_user(username="exporter", password=PASSWORD)
+        self.user, _ = make_login("exporter")
         self.alpha = Group.objects.create(name="Alpha")
         self.beta = Group.objects.create(name="Beta   Team")
         self.ids = [self.alpha.pk, self.beta.pk]
