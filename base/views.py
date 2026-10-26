@@ -6,13 +6,14 @@ This module is used to map url pattens with django views or methods
 
 import csv
 import json
+import mimetypes
 import os
 import threading
 import uuid
 from datetime import datetime, timedelta
 from email.mime.image import MIMEImage
 from os import path
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode
 
 import pandas as pd
 from dateutil import parser
@@ -23,6 +24,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import Group, Permission, User
 from django.contrib.auth.views import PasswordResetConfirmView, PasswordResetView
+from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile
 from django.core.mail import EmailMessage, EmailMultiAlternatives
 from django.core.management import call_command
@@ -38,6 +40,8 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
+from django.utils._os import safe_join
+from django.utils.cache import patch_cache_control
 from django.utils.html import strip_tags
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
@@ -7508,7 +7512,7 @@ def view_penalties(request):
 
 
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.exceptions import AuthenticationFailed, TokenError
 from rest_framework_simplejwt.tokens import UntypedToken
 
 
@@ -7522,41 +7526,68 @@ def is_jwt_token_valid(auth_header):
         validated_token = JWTAuthentication().get_validated_token(token)
         user = JWTAuthentication().get_user(validated_token)
         return user
-    except (InvalidToken, TokenError):
+    except (TokenError, AuthenticationFailed):  # bad token, or user deleted/inactive
         return None
 
 
-def protected_media(request, path):
-    public_pages = [
-        "/login",
-        "/forgot-password",
-        "/change-username",
-        "/change-password",
-        "/employee-reset-password",
-        "/recruitment/candidate-survey",
-        "/recruitment/open-recruitments",
-        "/recruitment/candidate-self-status-tracking",
-    ]
-    exempted_folders = ["base/icon/"]
+# Media that pages shown before login need (login, password reset, error
+# pages, open recruitments): company logos only. Matched against the path
+# after normalisation, relative to MEDIA_ROOT. Never add a folder that can hold
+# personal data.
+PUBLIC_MEDIA_PREFIXES = (
+    "base/icon/",  # company logos uploaded before 2025-07-30
+    "base/company/icon/",  # company logos since then (horilla.models.upload_path)
+)
 
-    media_path = os.path.join(settings.MEDIA_ROOT, path)
-    if not os.path.exists(media_path):
+# Shown in the browser; every other type downloads. SVG is left out on
+# purpose: it can carry script.
+INLINE_MEDIA_TYPES = {
+    "application/pdf",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+
+@require_http_methods(["GET", "HEAD"])
+def protected_media(request, path):
+    """
+    Serve a file from MEDIA_ROOT. Company logos are public; everything else
+    needs a session or a valid API token. Paths outside MEDIA_ROOT are 404.
+    """
+    try:
+        media_path = safe_join(settings.MEDIA_ROOT, path)
+    except (SuspiciousFileOperation, ValueError):
         raise Http404("File not found")
 
-    referer_path = urlparse(request.META.get("HTTP_REFERER", "")).path
+    relative_path = os.path.relpath(media_path, settings.MEDIA_ROOT)
+    is_public = relative_path.startswith(PUBLIC_MEDIA_PREFIXES)
 
-    # Try Bearer token auth
-    jwt_user = is_jwt_token_valid(request.META.get("HTTP_AUTHORIZATION", ""))
-
-    # Access control logic
-    if referer_path not in public_pages and not any(
-        path.startswith(f) for f in exempted_folders
+    if not (
+        is_public
+        or request.user.is_authenticated
+        or is_jwt_token_valid(request.META.get("HTTP_AUTHORIZATION", ""))
     ):
-        if not request.user.is_authenticated and not jwt_user:
-            messages.error(
-                request,
-                "You must be logged in or provide a valid token to access this file.",
-            )
-            return redirect("login")
+        messages.error(
+            request,
+            "You must be logged in or provide a valid token to access this file.",
+        )
+        response = redirect("login")
+        patch_cache_control(response, private=True)
+        return response
 
-    return FileResponse(open(media_path, "rb"))
+    try:
+        handle = open(media_path, "rb")
+    except (OSError, ValueError):  # missing, a directory, unreadable
+        raise Http404("File not found")
+
+    content_type, _encoding = mimetypes.guess_type(media_path)
+    response = FileResponse(
+        handle,
+        as_attachment=content_type not in INLINE_MEDIA_TYPES,
+        filename=os.path.basename(media_path),
+    )
+    if not is_public:
+        patch_cache_control(response, private=True)
+    return response
