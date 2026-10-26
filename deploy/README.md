@@ -3,7 +3,7 @@
 The **Test and deploy** workflow (`.github/workflows/deploy.yml`) is started by hand: **Actions → Test and deploy → Run workflow**.
 
 - **Use workflow from:** pick a branch.
-  - Any branch: the leave tests and the login email case tests run.
+  - Any branch: the tests run (the modules listed in the workflow's **Run the tests** step).
   - `1.0`, with **deploy** ticked: the tested commit is also deployed to production.
 - **backup:** take a database backup to S3 first. The default is yes.
 - **migrate_apps:** the apps to migrate, comma-separated, for example `leave`. Leave it empty when no migration is needed.
@@ -22,6 +22,10 @@ The server side is `deploy/hrms-deploy.sh`, installed as `/home/ubuntu/bin/hrms-
 3. **Pulls** the code, **migrates** only the named apps, and runs `manage.py check`.
 4. **Restarts** gunicorn, then checks two things: no new errors in its log, and the login page answers.
 5. **On failure after the pull,** if no migration has run, it puts the previous commit back and restarts. After a migration it stops and reports instead, so a person decides.
+
+The script does not install Python packages. Until it does (plan p2-08), a change
+to `requirements.txt` reaches the server only by the manual procedure in
+`tracker/plans/p1-05-django-4-2-30.md`, section 4.4.
 
 ## Where to find the logs
 
@@ -92,7 +96,7 @@ The server side is `deploy/hrms-deploy.sh`, installed as `/home/ubuntu/bin/hrms-
 
 ```
 DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py migrate --run-syncdb
-DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py test leave base.test_login_email_case --keepdb
+DJANGO_SETTINGS_MODULE=horilla.settings_test python manage.py test leave base.test_login_email_case base.test_protected_media base.test_url_access base.test_view_permissions base.test_django_patch_level horilla_views.test_list_export horilla_api.test_api_permissions --keepdb
 ```
 
 `horilla/settings_test.py` builds the tables from the models instead of migrations, and switches Sentry off.
