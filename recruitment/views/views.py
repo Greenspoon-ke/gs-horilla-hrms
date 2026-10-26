@@ -1236,6 +1236,8 @@ def stage_view(request):
     )
 
 
+@login_required
+@permission_required(perm="recruitment.view_stage")  # same as stage_view
 def stage_data(request, rec_id):
     stages = StageFilter(request.GET).qs.filter(recruitment_id__id=rec_id)
     previous_data = request.GET.urlencode()

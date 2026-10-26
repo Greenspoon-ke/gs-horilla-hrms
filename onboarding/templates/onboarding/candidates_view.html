@@ -150,6 +150,8 @@
                                         >
                                         {% endif %}
                                     </li>
+                                    {# Same permission as offer_letter_bulk_status_update. #}
+                                    {% if perms.recruitment.change_recruitment %}
                                     <li class="oh-dropdown__item">
                                         <a
                                             href="#"
@@ -172,6 +174,7 @@
                                                 {% endfor %}
                                         </select>
                                     </li>
+                                    {% endif %}
                                     {% if perms.recruitment.delete_candidates %}
                                     <li class="oh-dropdown__item">
                                         <a
@@ -428,9 +431,10 @@
               })
         }else {
             $.ajax({
-                type: "GET",
+                type: "POST",
                 url: "{% url 'offer-letter-bulk-status-update' %}",
                 data: {
+                    csrfmiddlewaretoken: "{{ csrf_token }}",
                     ids: JSON.stringify(ids),
                     status: $(this).val(),
                 },
@@ -466,9 +470,10 @@
             }).then(function (result) {
                 if (result.isConfirmed) {
                     $.ajax({
-                        type: "GET",
+                        type: "POST",
                         url: "{% url 'onboarding-candidate-bulk-delete' %}",
                         data: {
+                            csrfmiddlewaretoken: "{{ csrf_token }}",
                             ids: JSON.stringify(ids),
                         },
                         success: function (response) {

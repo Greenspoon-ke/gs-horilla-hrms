@@ -16,6 +16,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
+from django.views.decorators.http import require_POST
 
 from base.methods import filtersubordinates, get_key_instances
 from horilla.decorators import hx_request_required, login_required, permission_required
@@ -1929,6 +1930,8 @@ def time_sheet_single_view(request, time_sheet_id):
     return render(request, "time_sheet/time_sheet_single_view.html", context)
 
 
+@login_required
+@require_POST
 def time_sheet_bulk_delete(request):
     """
     This method is used to delete set of Task instances
@@ -1936,7 +1939,16 @@ def time_sheet_bulk_delete(request):
     ids = request.POST["ids"]
     ids = json.loads(ids)
     for timesheet_id in ids:
-        timesheet = TimeSheet.objects.get(id=timesheet_id)
+        timesheet = TimeSheet.objects.filter(id=timesheet_id).first()
+        if timesheet is None:
+            continue
+        # Same rule as the single delete (time_sheet_delete).
+        if not time_sheet_delete_permissions(request, timesheet.id):
+            messages.error(
+                request,
+                _("You cannot delete %(timesheet)s.") % {"timesheet": timesheet},
+            )
+            continue
         try:
             timesheet.delete()
             messages.success(

@@ -110,6 +110,7 @@ from employee.models import (
     login_username,
 )
 from horilla.decorators import (
+    check_manager,
     hx_request_required,
     logger,
     login_required,
@@ -280,8 +281,23 @@ def self_info_update(request):
     )
 
 
+@login_required
+@require_http_methods(["POST"])
 def profile_edit_access(request, emp_id):
-    feature = request.GET.get("feature", None)
+    feature = request.GET.get("feature")
+    employee = Employee.objects.filter(id=emp_id).first()
+    # Same rule as the menu link in employee_card.html, and only the one
+    # feature this toggle is used for.
+    if not (
+        employee
+        and feature == "profile_edit"
+        and (
+            request.user.has_perm("employee.change_employee")
+            or check_manager(request.user.employee_get, employee)
+        )
+    ):
+        messages.info(request, _("You dont have permission."))
+        return HttpResponseRedirect(request.META.get("HTTP_REFERER", "/"))
     accessibility = DefaultAccessibility.objects.filter(feature=feature).first()
     if accessibility:
         employees = Employee.objects.filter(id=emp_id)
