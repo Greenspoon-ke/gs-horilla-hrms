@@ -14,6 +14,7 @@ from horilla.settings import MIDDLEWARE
 MIDDLEWARE.append("base.middleware.CompanyMiddleware")
 MIDDLEWARE.append("horilla.horilla_middlewares.MethodNotAllowedMiddleware")
 MIDDLEWARE.append("horilla.horilla_middlewares.ThreadLocalMiddleware")
+MIDDLEWARE.append("base.middleware.LoginRequiredMiddleware")
 MIDDLEWARE.append("accessibility.middlewares.AccessibilityMiddleware")
 MIDDLEWARE.append("base.middleware.ForcePasswordChangeMiddleware")
 MIDDLEWARE.append("base.middleware.TwoFactorAuthMiddleware")
