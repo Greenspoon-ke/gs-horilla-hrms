@@ -1646,6 +1646,10 @@ def mail_server_delete(request):
             )
 
 
+# Same permission as mail_server_delete, which renders this form.
+@login_required
+@require_http_methods(["POST"])
+@permission_required("base.delete_dynamicemailconfiguration")
 def replace_primary_mail(request):
     """
     This method is used to replace primary mail server

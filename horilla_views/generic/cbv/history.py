@@ -4,6 +4,7 @@ horilla_views/generic/cbv/history.py
 
 from django.apps import apps
 from django.contrib import messages
+from django.http import HttpResponseForbidden
 from django.utils.decorators import method_decorator
 from django.views.generic import DetailView
 from simple_history.utils import get_history_model_for_model
@@ -49,6 +50,8 @@ class HorillaHistoryView(DetailView):
         """
         app, model = request.GET["model"].split(".")
         self.model = apps.get_model(app, model)
+        if not request.user.has_perm(f"{app}.change_{self.model._meta.model_name}"):
+            return HttpResponseForbidden()
 
         history = get_history_model_for_model(self.model).objects.get(
             history_id=history_id

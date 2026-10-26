@@ -20,6 +20,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from django.views.decorators.http import require_POST
 
 from base.methods import (
     closest_numbers,
@@ -480,6 +481,9 @@ def update_payslip_status(request, payslip_id):
     return render(request, "payroll/payslip/individual_payslip_summery.html", data)
 
 
+@login_required
+@permission_required("payroll.change_payslip")
+@require_POST
 def update_payslip_status_no_id(request):
     """
     This method is used to update the payslip confirmation status
@@ -802,6 +806,8 @@ def dashboard_employee_chart(request):
         return JsonResponse(response)
 
 
+@login_required
+@permission_required("payroll.view_payslip")  # every employee's pay totals
 def payslip_details(request):
     """
     payroll dashboard payslip details data
@@ -891,6 +897,8 @@ def dashboard_department_chart(request):
         return JsonResponse(response)
 
 
+@login_required
+@permission_required("payroll.view_contract")  # gate of the dashboard page
 def contract_ending(request):
     """
     payroll dashboard contract ending details data
@@ -926,6 +934,8 @@ def contract_ending(request):
     return JsonResponse(response)
 
 
+@login_required
+@permission_required("payroll.view_payslip")  # exports every employee's payslips
 def payslip_export(request):
     """
     payroll dashboard exporting to excell data

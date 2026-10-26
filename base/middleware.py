@@ -5,9 +5,12 @@ middleware.py
 from django.apps import apps
 from django.contrib import messages
 from django.contrib.auth import logout
+from django.contrib.auth.views import redirect_to_login
 from django.core.cache import cache
 from django.db.models import Q
+from django.http import HttpResponse
 from django.shortcuts import redirect
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from base.backends import ConfiguredEmailBackend
@@ -247,3 +250,89 @@ class TwoFactorAuthMiddleware:
                 return self.get_response(request)
 
         return self.get_response(request)
+
+
+# Routes anyone may open without logging in. Every other route needs a login
+# (LoginRequiredMiddleware). Entries are route patterns exactly as Django
+# resolves them (request.resolver_match.route). base/test_url_access.py fails
+# if an entry stops existing. Removing a line closes that route.
+PUBLIC_ROUTES = frozenset(
+    {
+        # Sign in and password reset
+        "login/",
+        "logout",
+        "forgot-password",
+        "reset-send-success",
+        "accounts/reset/<uidb64>/<token>/",  # link in the password-reset email
+        "accounts/reset/done/",
+        # Infrastructure and error pages
+        "health/",
+        "i18n/setlang/",
+        "404",
+        "^media/(?P<path>.*)$",  # protected_media checks access itself
+        # First-run setup wizard (p1-07 decides whether these stay)
+        "initialize-database",
+        "initialize-database-user",
+        "initialize-database-company",
+        "initialize-database-department",
+        "initialize-database-job-position",
+        "initialize-department-edit/<int:obj_id>",
+        "initialize-department-delete/<int:obj_id>",
+        "initialize-job-position-edit/<int:obj_id>",
+        "initialize-job-position-delete/<int:obj_id>",
+        "load-demo-database",
+        # Public job pages and application form
+        "recruitment/open-recruitments",
+        "recruitment/recruitment-details/<int:id>/",
+        "recruitment/application-form",
+        "recruitment/candidate-survey",
+        "recruitment/resume-completion",  # called by application_form.html
+        "recruitment/get-open-positions",  # called by recruitmentAjax.js
+        # Candidate portal (candidate session, checked by candidate_login_required)
+        "recruitment/candidate-login",
+        "recruitment/candidate-self-status-tracking/",
+        "recruitment/candidate-add-notes/<int:cand_id>",
+        "recruitment/note-delete-individual/<int:note_id>/",
+        "recruitment/candidate-file-upload/<int:id>",
+        "recruitment/candidate-view-file/<int:id>",
+        "reload-messages",  # used by candidate_self_tracking.html
+        # Onboarding portal (token in the URL)
+        "onboarding/user-creation/<str:token>",
+        "onboarding/profile-view/<str:token>",
+        "onboarding/employee-creation/<str:token>",
+        "onboarding/employee-bank-details/<str:token>",
+        # django-notifications live counters answer anonymous users with zero
+        "^inbox/notifications/api/unread_count/$",
+        "^inbox/notifications/api/unread_list/$",
+        "^inbox/notifications/api/all_count/$",
+        "^inbox/notifications/api/all_list/",
+    }
+)
+
+# Admin has its own login. The API checks JWT inside each view.
+SKIPPED_ROUTE_PREFIXES = ("admin/", "api/")
+
+
+class LoginRequiredMiddleware:
+    """
+    Send anonymous users to the login page unless the route is public.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        route = request.resolver_match.route
+        if (
+            request.user.is_authenticated
+            or route in PUBLIC_ROUTES
+            or route.startswith(SKIPPED_ROUTE_PREFIXES)
+        ):
+            return None
+        # Same answers as horilla.decorators.login_required.
+        if request.headers.get("HX-Request"):
+            return HttpResponse(status=204, headers={"HX-Refresh": "true"})
+        return redirect_to_login(request.get_full_path(), reverse("login"))

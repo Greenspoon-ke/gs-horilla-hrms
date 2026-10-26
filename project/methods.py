@@ -165,15 +165,20 @@ def time_sheet_update_permissions(request, time_sheet_id):
 def time_sheet_delete_permissions(request, time_sheet_id):
     employee = request.user.employee_get
     timesheet = TimeSheet.objects.filter(id=time_sheet_id).first()
-    if (
+    if timesheet is None:
+        return False
+    # task_id and Task.project are nullable.
+    task = timesheet.task_id
+    return (
         request.user.has_perm("project.delete_timesheet")
         or timesheet.employee_id == employee
-        or employee in timesheet.task_id.task_managers.all()
-        or employee in timesheet.task_id.project.managers.all()
-    ):
-        return True
-    else:
-        return False
+        or (task is not None and employee in task.task_managers.all())
+        or (
+            task is not None
+            and task.project is not None
+            and employee in task.project.managers.all()
+        )
+    )
 
 
 def get_all_project_members_and_managers():

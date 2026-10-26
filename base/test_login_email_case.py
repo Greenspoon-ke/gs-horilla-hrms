@@ -23,6 +23,7 @@ from employee.methods.methods import (
 from employee.models import Employee
 from horilla.horilla_middlewares import _thread_locals
 from leave.tests import add_missing_user_column
+from leave.tests import make_employee as make_login_employee
 
 PHONE = "0700000000"
 
@@ -209,13 +210,26 @@ class LoginEmailCaseTests(TestCase):
         self.assertEqual(len(mail.outbox), 1)
 
     def test_employee_password_reset_with_different_case(self):
-        response = Client().post(
+        # The real caller is the logged-in "Send password reset link" form.
+        # self.user was auto-created with is_new_employee=True, so it would be
+        # sent to change-password; use a separate sender.
+        sender, _ = make_login_employee("hr.sender")
+        client = Client()
+        client.force_login(sender)
+        response = client.post(
             reverse("employee-reset-password"),
             {"email": "TESTUSER1@EXAMPLE.INVALID"},
             HTTP_REFERER="/",
         )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(len(mail.outbox), 1)
+
+    def test_employee_password_reset_needs_login(self):
+        response = Client().post(
+            reverse("employee-reset-password"), {"email": "testuser1@example.invalid"}
+        )
+        self.assertTrue(response["Location"].startswith(reverse("login")))
+        self.assertEqual(len(mail.outbox), 0)
 
     def test_password_reset_unknown_address_keeps_existing_message(self):
         response = Client().post(

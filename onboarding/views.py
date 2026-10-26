@@ -1833,12 +1833,20 @@ def candidate_select_filter(request):
         return JsonResponse(context)
 
 
+# Same permission as update_offer_letter_status.
+@login_required
+@permission_required("recruitment.change_recruitment")
+@require_POST
 def offer_letter_bulk_status_update(request):
     """
     This function is used to bulk update the offerletter status
     """
-    ids = json.loads(request.GET.get("ids", []))
-    status = request.GET.get("status")
+    ids = json.loads(request.POST.get("ids", "[]"))
+    status = request.POST.get("status")
+    # Same allowed values as update_offer_letter_status.
+    if status not in ["not_sent", "sent", "accepted", "rejected", "joined"]:
+        messages.error(request, "Please Pass valid status")
+        return JsonResponse("success", safe=False)
     for id in ids:
         try:
             candidate = Candidate.objects.filter(id=int(id)).first()
@@ -1854,13 +1862,16 @@ def offer_letter_bulk_status_update(request):
     return JsonResponse("success", safe=False)
 
 
+# Same permission as candidate_delete.
+@login_required
+@permission_required("onboarding.delete_onboardingcandidate")
+@require_POST
 def onboarding_candidate_bulk_delete(request):
     """
     This function is used to bulk delete onboarding candidates
     """
 
-    ids = json.loads(request.GET.get("ids", []))
-    status = request.GET.get("status")
+    ids = json.loads(request.POST.get("ids", "[]"))
     for id in ids:
         try:
             candidate = Candidate.objects.filter(id=int(id)).first()

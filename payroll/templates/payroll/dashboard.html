@@ -67,6 +67,8 @@
 
                     <div class="oh-main__titlebar-button-container">
 
+                        {# Same gate as dashboard-export (payslip_export). #}
+                        {% if perms.payroll.view_payslip %}
                         <div class="oh-dropdown" x-data="{open: false}">
                           <button class="oh-btn oh-btn--secondary oh-btn--shadow ml-2" @click="open = !open">
                             <ion-icon name="download-outline" class="mr-1"></ion-icon>{% trans "Export" %}
@@ -127,6 +129,7 @@
                             </form>
                           </div>
                         </div>
+                        {% endif %}
                     </div>
                 </div>
 
