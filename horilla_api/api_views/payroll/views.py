@@ -310,7 +310,9 @@ class ReimbursementView(APIView):
             return Response(serializer.data, status=200)
         return Response(serializer.errors, status=400)
 
-    @method_decorator(permission_required("payroll.change_reimbursement"))
+    @method_decorator(
+        permission_required("payroll.change_reimbursement", raise_exception=True)
+    )
     def put(self, request, pk):
         reimbursement = Reimbursement.objects.get(id=pk)
         serializer = self.serializer_class(instance=reimbursement, data=request.data)
@@ -319,7 +321,9 @@ class ReimbursementView(APIView):
             return Response(serializer.data, status=200)
         return Response(serializer.errors, status=400)
 
-    @method_decorator(permission_required("payroll.delete_reimbursement"))
+    @method_decorator(
+        permission_required("payroll.delete_reimbursement", raise_exception=True)
+    )
     def delete(self, request, pk):
         reimbursement = Reimbursement.objects.get(id=pk)
         reimbursement.delete()
@@ -329,16 +333,28 @@ class ReimbursementView(APIView):
 class ReimbusementApproveRejectView(APIView):
     permission_classes = [IsAuthenticated]
 
+    # Same permission as the web approve_reimbursements view.
+    @method_decorator(
+        permission_required("payroll.change_reimbursement", raise_exception=True)
+    )
     def post(self, request, pk):
         status = request.data.get("status", None)
-        amount = request.data.get("amount", None)
-        amount = (
-            eval_validate(request.data.get("amount"))
-            if request.data.get("amount")
-            else 0
-        )
-        amount = max(0, amount)
+        if status == "canceled":  # same mapping as the web view
+            status = "rejected"
+        if status not in dict(Reimbursement.status_types):
+            return Response({"error": "Invalid status"}, status=400)
+        try:
+            amount = (
+                eval_validate(str(request.data.get("amount")))
+                if request.data.get("amount")
+                else 0
+            )
+            amount = max(0, amount)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return Response({"error": "Invalid amount"}, status=400)
         reimbursement = Reimbursement.objects.filter(id=pk)
+        if not reimbursement.exists():
+            return Response({"error": "Not found"}, status=404)
         if amount:
             reimbursement.update(amount=amount)
         reimbursement.update(status=status)
@@ -371,20 +387,8 @@ class TaxBracketView(APIView):
             return Response(serializer.data, status=200)
         return Response(serializer.errors, status=400)
 
-    @method_decorator(
-        permission_required("payroll.change_taxbracket", raise_exception=True)
-    )
-    def put(self, request, pk):
-        tax_bracket = get_object_or_404(TaxBracket, id=pk)
-        serializer = TaxBracketSerializer(
-            instance=tax_bracket, data=request.data, partial=True
-        )
-        # Bug kept on purpose: PUT writes nothing until Paul decides whether
-        # API edits should exist (plan p1-04, section 11 question 1).
-        if serializer.save():
-            serializer.save()
-            return Response(serializer.data, status=200)
-        return Response(serializer.errors, status=400)
+    # No put(): it never worked (it saved before validating) and edits stay
+    # in the web form. PUT answers 405.
 
     @method_decorator(
         permission_required("payroll.delete_taxbracket", raise_exception=True)

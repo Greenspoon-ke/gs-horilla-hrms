@@ -11,7 +11,7 @@ Synthetic data only. The test runner never touches the real database.
 from datetime import date, timedelta
 
 from django.contrib.auth.models import Group, Permission
-from django.test import Client, TestCase
+from django.test import Client, RequestFactory, TestCase
 from django.urls import URLResolver, get_resolver
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.settings import api_settings
@@ -22,7 +22,7 @@ from base.models import Company
 from horilla.horilla_middlewares import _thread_locals
 from leave.models import Holiday
 from leave.tests import PASSWORD, add_missing_user_column, make_employee
-from payroll.models.models import FilingStatus
+from payroll.models.models import FilingStatus, Reimbursement
 from payroll.models.tax_models import TaxBracket
 
 # Views that may be called without a token. Adding one here needs review.
@@ -169,7 +169,7 @@ class TaxBracketApiTests(ApiTestCase):
         )
 
     def new_bracket(self):
-        return {"filing_status_id": self.filing.pk, "min_income": 1000, "tax_rate": 20}
+        return {"filing_status_id": self.filing.pk, "min_income": 1001, "tax_rate": 20}
 
     def assertUnchanged(self):
         self.assertEqual(TaxBracket.objects.count(), 1)
@@ -227,8 +227,9 @@ class TaxBracketApiTests(ApiTestCase):
             self.detail, {"tax_rate": 50}, content_type="application/json", **headers
         )
         delete = self.client.delete(self.detail, **headers)
+        # PUT has no handler any more: 405 for any token holder.
         self.assertEqual(
-            [post.status_code, put.status_code, delete.status_code], [403] * 3
+            [post.status_code, put.status_code, delete.status_code], [403, 405, 403]
         )
         self.assertUnchanged()
 
@@ -286,20 +287,77 @@ class TaxBracketApiTests(ApiTestCase):
                 self.assertEqual(response.status_code, 400)
         self.assertUnchanged()
 
-    def test_change_perm_put_still_writes_nothing(self):
-        # Pre-existing bug kept on purpose (save() before is_valid()): the API
-        # opens no new write path. A test Client that raises shows it directly.
-        client = Client()
+    def test_put_not_allowed(self):
+        # PUT never worked (it saved before validating); edits stay in the
+        # web form, which validates them.
         for data in ({"tax_rate": 12.5}, {"tax_rate": "abc"}):
             with self.subTest(data=data):
-                with self.assertRaises(AssertionError):
-                    client.put(
-                        self.detail,
-                        data,
-                        content_type="application/json",
-                        **bearer(self.payroll),
-                    )
+                response = self.client.put(
+                    self.detail,
+                    data,
+                    content_type="application/json",
+                    **bearer(self.payroll),
+                )
+                self.assertEqual(response.status_code, 405)
         self.assertUnchanged()
+
+    def test_post_runs_web_form_checks(self):
+        cases = {
+            "duplicate": {
+                "filing_status_id": self.filing.pk,
+                "min_income": 0,
+                "max_income": 1000,
+                "tax_rate": 10,
+            },
+            "min not below max": {
+                "filing_status_id": self.filing.pk,
+                "min_income": 5000,
+                "max_income": 4000,
+                "tax_rate": 5,
+            },
+            "overlaps existing": {
+                "filing_status_id": self.filing.pk,
+                "min_income": 500,
+                "max_income": 2000,
+                "tax_rate": 5,
+            },
+            "NaN rate": {**self.new_bracket(), "tax_rate": "NaN"},
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                response = self.client.post(
+                    TAX_URL,
+                    data,
+                    content_type="application/json",
+                    **bearer(self.payroll),
+                )
+                self.assertEqual(response.status_code, 400)
+        self.assertUnchanged()
+
+    def test_post_ignores_audit_and_active_fields(self):
+        response = self.client.post(
+            TAX_URL,
+            {
+                **self.new_bracket(),
+                "is_active": False,
+                "created_by": self.employee.pk,
+                "modified_by": self.employee.pk,
+            },
+            content_type="application/json",
+            **bearer(self.payroll),
+        )
+        self.assertEqual(response.status_code, 200)
+        created = TaxBracket.objects.exclude(pk=self.bracket.pk).get()
+        self.assertTrue(created.is_active)
+        # Recorded as the real caller, never the value sent in the body.
+        self.assertEqual(created.created_by, self.payroll)
+        self.assertNotEqual(created.modified_by, self.employee)
+        # A blank maximum means no upper limit, as in the web form; the API
+        # shows it as null because JSON has no infinity.
+        self.assertEqual(created.max_income, float("inf"))
+        self.assertIsNone(response.json()["max_income"])
+        listed = self.client.get(TAX_URL, **bearer(self.viewer))
+        self.assertEqual(listed.status_code, 200)
 
     def test_delete_perm_deletes(self):
         response = self.client.delete(self.detail, **bearer(self.payroll))
@@ -311,12 +369,9 @@ class TaxBracketApiTests(ApiTestCase):
         headers = bearer(self.payroll)
         responses = [
             self.client.get(missing, **headers),
-            self.client.put(
-                missing, {"tax_rate": 1}, content_type="application/json", **headers
-            ),
             self.client.delete(missing, **headers),
         ]
-        self.assertEqual([r.status_code for r in responses], [404] * 3)
+        self.assertEqual([r.status_code for r in responses], [404] * 2)
 
     def test_non_numeric_pk_404(self):
         response = self.client.get(f"{TAX_URL}abc", **bearer(self.payroll))
@@ -446,3 +501,110 @@ class OtherAllowAnyViewsTests(ApiTestCase):
         self.user.save()
         response = self.client.get("/api/leave/holiday/", **bearer(self.user))
         self.assertEqual(response.status_code, 403)
+
+
+class ReimbursementApiTests(ApiTestCase):
+    """Approve/reject and edit need the same permissions as the web pages."""
+
+    def setUp(self):
+        super().setUp()
+        self.requester, requester_employee = make_employee("requester")
+        self.approver, _ = make_employee("approver")
+        grant(self.approver, "payroll.change_reimbursement")
+        self.deleter, _ = make_employee("deleter")
+        grant(self.deleter, "payroll.delete_reimbursement")
+        # Reimbursement.save reads the request user from the thread-local.
+        request = RequestFactory().get("/")
+        request.user = self.requester
+        request.session = {}
+        _thread_locals.request = request
+        self.reimbursement = Reimbursement.objects.create(
+            title="Taxi",
+            type="reimbursement",
+            employee_id=requester_employee,
+            allowance_on=date(2026, 1, 15),
+            attachment="payroll/reimbursement/taxi.pdf",
+            amount=100,
+        )
+        _thread_locals.request = None
+        self.approve_url = (
+            f"/api/payroll/reimbusement-approve-reject/{self.reimbursement.pk}"
+        )
+
+    def approve(self, user, data):
+        return self.client.post(
+            self.approve_url, data, content_type="application/json", **bearer(user)
+        )
+
+    def state(self):
+        self.reimbursement.refresh_from_db()
+        return self.reimbursement.status, self.reimbursement.amount
+
+    def test_anonymous_approve_401(self):
+        response = self.client.post(self.approve_url, {"status": "approved"})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.state(), ("requested", 100))
+
+    def test_employee_cannot_approve_or_change_amount(self):
+        for user in (self.requester, self.deleter):
+            with self.subTest(user=user.username):
+                response = self.approve(user, {"status": "approved", "amount": "5000"})
+                self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.state(), ("requested", 100))
+
+    def test_approver_approves_and_rejects(self):
+        response = self.approve(self.approver, {"status": "approved"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.state(), ("approved", 100))
+        response = self.approve(self.approver, {"status": "canceled"})
+        self.assertEqual(response.json(), {"status": "rejected"})
+
+    def test_approver_amount_as_number_or_text(self):
+        # A negative amount becomes 0, which leaves the amount as it was.
+        for amount, expected in ((250, 250), ("300", 300), ("-5", 300)):
+            with self.subTest(amount=amount):
+                response = self.approve(
+                    self.approver, {"status": "approved", "amount": amount}
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.state()[1], expected)
+
+    def test_approver_bad_input_400(self):
+        cases = [
+            {"status": "paid"},
+            {},
+            {"status": "approved", "amount": "abc"},
+            {"status": "approved", "amount": "[1]"},
+            {"status": "approved", "amount": "9" * 5000 + "**9"},
+        ]
+        for data in cases:
+            with self.subTest(data=str(data)[:40]):
+                self.assertEqual(self.approve(self.approver, data).status_code, 400)
+        self.assertEqual(self.state(), ("requested", 100))
+
+    def test_missing_reimbursement_404(self):
+        response = self.client.post(
+            "/api/payroll/reimbusement-approve-reject/999999",
+            {"status": "approved"},
+            content_type="application/json",
+            **bearer(self.approver),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_edit_and_delete_without_perm_403(self):
+        url = f"/api/payroll/reimbusement/{self.reimbursement.pk}"
+        headers = bearer(self.requester)
+        put = self.client.put(
+            url, {"amount": 1}, content_type="application/json", **headers
+        )
+        delete = self.client.delete(url, **headers)
+        self.assertEqual([put.status_code, delete.status_code], [403, 403])
+        self.assertTrue(Reimbursement.objects.filter(pk=self.reimbursement.pk).exists())
+
+    def test_delete_with_perm_passes_the_permission_check(self):
+        # Pre-existing (ticket p2-24): Reimbursement.delete() only deletes rows
+        # that have an allowance and otherwise raises, on the web too. Here we
+        # only check that the permission holder is not refused.
+        url = f"/api/payroll/reimbusement/{self.reimbursement.pk}"
+        response = self.client.delete(url, **bearer(self.deleter))
+        self.assertNotIn(response.status_code, (401, 403))

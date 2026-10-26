@@ -1,3 +1,6 @@
+import math
+
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from employee.models import BonusPoint, Employee
@@ -317,4 +320,30 @@ class ReimbursementSerializer(serializers.ModelSerializer):
 class TaxBracketSerializer(serializers.ModelSerializer):
     class Meta:
         fields = "__all__"
+        # The web form (TaxBracketForm) excludes is_active too.
+        read_only_fields = ["is_active"]
         model = TaxBracket
+
+    def validate(self, attrs):
+        for name in ("min_income", "max_income", "tax_rate"):
+            value = attrs.get(name)
+            if value is not None and math.isnan(value):
+                raise serializers.ValidationError({name: "Must be a number."})
+        # Same checks as the web form: TaxBracket.clean() rejects duplicates,
+        # min >= max and overlaps, and turns a blank maximum into infinity.
+        instance = TaxBracket(**attrs)
+        try:
+            instance.clean()
+        except DjangoValidationError as error:
+            raise serializers.ValidationError(
+                error.message_dict if hasattr(error, "error_dict") else error.messages
+            )
+        attrs["max_income"] = instance.max_income
+        return attrs
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # An open-ended bracket is stored as infinity, which JSON cannot carry.
+        if data.get("max_income") == math.inf:
+            data["max_income"] = None
+        return data
