@@ -1,5 +1,6 @@
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -8,6 +9,9 @@ from ...api_serializers.auth.serializers import GetEmployeeSerializer
 
 
 class LoginAPIView(APIView):
+    # The only public API view; everything else needs a token (rest_conf.py).
+    permission_classes = [AllowAny]
+
     def post(self, request):
         if "username" and "password" in request.data.keys():
             username = str(request.data.get("username") or "").strip()

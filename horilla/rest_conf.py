@@ -19,6 +19,10 @@ REST_FRAMEWORK_SETTINGS = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
+    # Closed by default: a view is public only if it sets
+    # permission_classes = [AllowAny]. horilla_api/test_api_permissions.py
+    # fails CI for any other public DRF view.
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "PAGE_SIZE": 20,
 }
 

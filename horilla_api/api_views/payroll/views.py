@@ -2,7 +2,7 @@ import gettext
 from collections import defaultdict
 
 from django.contrib.auth.decorators import permission_required
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.utils.decorators import method_decorator
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
@@ -346,16 +346,24 @@ class ReimbusementApproveRejectView(APIView):
 
 
 class TaxBracketView(APIView):
+    # Same permissions as the web pages in payroll/views/tax_views.py.
+    permission_classes = [IsAuthenticated]
 
+    @method_decorator(
+        permission_required("payroll.view_taxbracket", raise_exception=True)
+    )
     def get(self, request, pk=None):
         if pk:
-            tax_bracket = TaxBracket.objects.get(id=pk)
+            tax_bracket = get_object_or_404(TaxBracket, id=pk)
             serializer = TaxBracketSerializer(tax_bracket)
             return Response(serializer.data, status=200)
         tax_brackets = TaxBracket.objects.all()
         serializer = TaxBracketSerializer(instance=tax_brackets, many=True)
         return Response(serializer.data, status=200)
 
+    @method_decorator(
+        permission_required("payroll.add_taxbracket", raise_exception=True)
+    )
     def post(self, request):
         serializer = TaxBracketSerializer(data=request.data)
         if serializer.is_valid():
@@ -363,17 +371,25 @@ class TaxBracketView(APIView):
             return Response(serializer.data, status=200)
         return Response(serializer.errors, status=400)
 
+    @method_decorator(
+        permission_required("payroll.change_taxbracket", raise_exception=True)
+    )
     def put(self, request, pk):
-        tax_bracket = TaxBracket.objects.get(id=pk)
+        tax_bracket = get_object_or_404(TaxBracket, id=pk)
         serializer = TaxBracketSerializer(
             instance=tax_bracket, data=request.data, partial=True
         )
+        # Bug kept on purpose: PUT writes nothing until Paul decides whether
+        # API edits should exist (plan p1-04, section 11 question 1).
         if serializer.save():
             serializer.save()
             return Response(serializer.data, status=200)
         return Response(serializer.errors, status=400)
 
+    @method_decorator(
+        permission_required("payroll.delete_taxbracket", raise_exception=True)
+    )
     def delete(self, request, pk):
-        tax_bracket = TaxBracket.objects.get(id=pk)
+        tax_bracket = get_object_or_404(TaxBracket, id=pk)
         tax_bracket.delete()
         return Response(status=200)
