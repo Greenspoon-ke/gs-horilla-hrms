@@ -299,7 +299,7 @@ sentry_sdk.init(
     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
     send_default_pii=True,
     before_send=before_send,
-    # Keep your sample rates low to save quota
-    traces_sample_rate=0.01,
+    # Tracing (spans) is off by default to save quota; error reporting is unaffected. Set SENTRY_TRACES_SAMPLE_RATE (0.0-1.0) to turn it back on.
+    traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
 )
 
