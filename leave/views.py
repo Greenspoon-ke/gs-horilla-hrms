@@ -61,9 +61,13 @@ from leave.methods import (
     calculate_requested_days,
     can_act_on,
     can_grant_directly,
+    chain_rejecter_step,
+    chain_step,
     company_leave_dates_list,
     filter_conditional_leave_request,
+    hide_pending_chains,
     holiday_dates_list,
+    next_chain_approver,
     notify_direct_grant,
     revoke_allocation,
 )
@@ -551,21 +555,7 @@ def leave_request_view(request):
     queryset = LeaveRequestFilter(request.GET).qs.order_by("-id").distinct()
     multiple_approvals = filter_conditional_leave_request(request).distinct()
     normal_requests = filtersubordinates(request, queryset, "leave.view_leaverequest")
-
-    if not request.user.is_superuser:
-        multi_approve_requests = LeaveRequestConditionApproval.objects.filter(
-            is_approved=False, is_rejected=False
-        )
-
-        multi_ids = [request.leave_request_id.id for request in multi_approve_requests]
-
-        # Create a new list excluding leave requests with IDs in multi_ids
-        normal_requests = [
-            leave.id for leave in normal_requests if leave.id not in multi_ids
-        ]
-
-        # Convert the list of IDs back to a queryset
-        normal_requests = LeaveRequest.objects.filter(id__in=normal_requests).distinct()
+    normal_requests = hide_pending_chains(request, normal_requests)
 
     queryset = normal_requests | multiple_approvals
     page_number = request.GET.get("page")
@@ -826,19 +816,7 @@ def leave_request_filter(request):
     field = request.GET.get("field")
     multiple_approvals = filter_conditional_leave_request(request)
     queryset = filtersubordinates(request, queryset, "leave.view_leaverequest")
-
-    if not request.user.is_superuser:
-        multi_approve_requests = LeaveRequestConditionApproval.objects.filter(
-            is_approved=False, is_rejected=False
-        )
-
-        multi_ids = [request.leave_request_id.id for request in multi_approve_requests]
-
-        # Create a new list excluding leave requests with IDs in multi_ids
-        queryset = [leave.id for leave in queryset if leave.id not in multi_ids]
-
-        # Convert the list of IDs back to a queryset
-        queryset = LeaveRequest.objects.filter(id__in=queryset)
+    queryset = hide_pending_chains(request, queryset)
 
     queryset = queryset.distinct()
     multiple_approvals = multiple_approvals.distinct()
@@ -1049,27 +1027,29 @@ def leave_request_approve(request, id, emp_id=None):
                     available_leave.save()
                     send_notification = True
                 else:
-                    conditional_requests = leave_request.multiple_approvals()
-                    approver = next(
-                        (
-                            manager
-                            for manager in conditional_requests["managers"]
-                            if manager == request.user.employee_get
-                        ),
-                        None,
-                    )
-                    condition_approval = LeaveRequestConditionApproval.objects.filter(
-                        manager_id=approver, leave_request_id=leave_request
-                    ).first()
-                    condition_approval.is_approved = True
-                    managers = []
-                    for manager in conditional_requests["managers"]:
-                        managers.append(manager.employee_user_id)
-                    if len(managers) > condition_approval.sequence:
+                    # Steps in order; the request (and the balance) only
+                    # changes once every step is approved.
+                    step, is_last, refusal = chain_step(request.user, leave_request)
+                    if refusal:
+                        messages.info(request, refusal)
+                        if emp_id is not None:
+                            return redirect(f"/employee/employee-view/{emp_id}/")
+                        return HttpResponseRedirect(
+                            request.META.get("HTTP_REFERER", "/")
+                        )
+                    step.is_approved = True
+                    step.is_rejected = False
+                    step.save()
+                    if is_last:
+                        leave_request.save()
+                        available_leave.save()
+                        send_notification = True
+                    else:
+                        next_approver = next_chain_approver(leave_request)
                         with contextlib.suppress(Exception):
                             notify.send(
                                 request.user.employee_get,
-                                recipient=managers[condition_approval.sequence],
+                                recipient=next_approver.employee_user_id,
                                 verb="You have a new leave request to validate.",
                                 verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
                                 verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
@@ -1078,12 +1058,6 @@ def leave_request_approve(request, id, emp_id=None):
                                 icon="people-circle",
                                 redirect=f"/leave/request-view?id={leave_request.id}",
                             )
-
-                    condition_approval.save()
-                    if approver == conditional_requests["managers"][-1]:
-                        leave_request.save()
-                        available_leave.save()
-                        send_notification = True
             messages.success(request, _("Leave request approved successfully.."))
             if send_notification:
                 with contextlib.suppress(Exception):
@@ -1220,15 +1194,16 @@ def leave_request_cancel(request, id, emp_id=None):
                 leave_request.leave_clashes_count = 0
 
                 if leave_request.multiple_approvals() and not request.user.is_superuser:
-                    conditional_requests = leave_request.multiple_approvals()
-                    approver = [
-                        manager
-                        for manager in conditional_requests["managers"]
-                        if manager.employee_user_id == request.user
-                    ]
-                    condition_approval = LeaveRequestConditionApproval.objects.filter(
-                        manager_id=approver[0], leave_request_id=leave_request
-                    ).first()
+                    # Only an approver in the chain rejects a chained request;
+                    # nothing above has been saved yet, so refusing is clean.
+                    condition_approval = chain_rejecter_step(
+                        request.user, leave_request
+                    )
+                    if condition_approval is None:
+                        messages.info(
+                            request, _("Only this request's approvers can reject it.")
+                        )
+                        return HttpResponse("<script>location.reload();</script>")
                     condition_approval.is_approved = False
                     condition_approval.is_rejected = True
                     condition_approval.save()
@@ -5337,17 +5312,22 @@ def leave_request_and_approve(request):
         request, leave_requests, "leave.change_leaverequest"
     )
 
-    # Filter the initial query set for multi_approve_requests
-    multi_approve_requests = LeaveRequestConditionApproval.objects.filter(
+    # A request in a Multiple Approvals chain shows only to the approver whose
+    # turn it is (upstream showed it to nobody, not even that approver).
+    pending_chain = LeaveRequestConditionApproval.objects.filter(
         is_approved=False, is_rejected=False
+    ).values("leave_request_id")
+    my_turn = filter_conditional_leave_request(request).filter(
+        status="requested",
+        employee_id__is_active=True,
+        start_date__gte=date.today(),
+        leaverequestconditionapproval__manager_id__employee_user_id=request.user,
+        leaverequestconditionapproval__is_approved=False,
     )
-    if multi_approve_requests:
-        multi_ids = [request.leave_request_id.id for request in multi_approve_requests]
-
-        # Create a new list excluding leave requests with IDs in multi_ids
-        leave_requests = [
-            leave for leave in leave_requests if leave.id not in multi_ids
-        ]
+    ids = set(
+        leave_requests.exclude(id__in=pending_chain).values_list("id", flat=True)
+    ) | set(my_turn.values_list("id", flat=True))
+    leave_requests = LeaveRequest.objects.filter(id__in=ids)
 
     leave_requests = paginator_qry(leave_requests, page_number)
     leave_requests_ids = json.dumps([instance.id for instance in leave_requests])

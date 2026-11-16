@@ -31,6 +31,7 @@ from horilla_audit.methods import get_diff
 from horilla_audit.models import HorillaAuditInfo, HorillaAuditLog
 from leave.methods import (
     calculate_requested_days,
+    chain_step,
     company_leave_dates_list,
     holiday_dates_list,
 )
@@ -895,11 +896,16 @@ class LeaveRequest(HorillaModel):
         if applicable_condition and self.status == "requested":
             LeaveRequestConditionApproval.objects.filter(leave_request_id=self).delete()
             sequence = 0
+            added = []
             managers = applicable_condition.approval_managers()
             for manager in managers:
                 if not isinstance(manager, Employee):
                     manager = getattr(self.employee_id.employee_work_info, manager)
-                if manager:
+                # One step per person, and never the requester's own: a lead who
+                # is also the second approver approves once (HR decision), and an
+                # approver's own leave goes to the rest of the chain.
+                if manager and manager != self.employee_id and manager not in added:
+                    added.append(manager)
                     sequence += 1
                     LeaveRequestConditionApproval.objects.create(
                         sequence=sequence,
@@ -1126,16 +1132,16 @@ class LeaveRequest(HorillaModel):
         return result
 
     def is_approved(self):
+        """
+        Templates use this to show the Approve button; despite the name, True
+        means the current user may approve now: always without a Multiple
+        Approvals chain, otherwise a superuser or the approver whose turn it is.
+        """
         request = getattr(horilla_middlewares._thread_locals, "request", None)
         if request:
-            employee = Employee.objects.filter(employee_user_id=request.user).first()
-            condition_approval = LeaveRequestConditionApproval.objects.filter(
-                leave_request_id=self, manager_id=employee.id
-            ).first()
-            if condition_approval:
-                return not condition_approval.is_approved
-            else:
+            if request.user.is_superuser or not self.multiple_approvals():
                 return True
+            return chain_step(request.user, self)[2] is None
 
     def delete(self, *args, **kwargs):
         if self.status == "requested":

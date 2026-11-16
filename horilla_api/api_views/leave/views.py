@@ -20,6 +20,8 @@ from leave.methods import (
     can_act_on,
     can_grant_directly,
     can_use_allocations,
+    chain_rejecter_step,
+    chain_step,
     filter_conditional_leave_request,
     notify_direct_grant,
     revoke_allocation,
@@ -34,6 +36,35 @@ FORBIDDEN = {"error": "You do not have permission to perform this action."}
 
 def forbidden():
     return Response(FORBIDDEN, status=403)
+
+
+CHAIN_REJECT_REFUSAL = "Only this request's approvers can reject it."
+
+
+def approve_chain_step(user, leave_request, available_leave):
+    """
+    Approve the user's Multiple Approvals step (shared by single and bulk
+    approve). Returns (refusal, final): the request and the balance change
+    only when the last outstanding step is approved; a superuser approves
+    every step at once, as on the web.
+    """
+    if not user.is_superuser:
+        step, is_last, refusal = chain_step(user, leave_request)
+        if refusal:
+            return refusal, False
+        step.is_approved = True
+        step.is_rejected = False
+        step.save()
+        if not is_last:
+            return None, False
+    else:
+        LeaveRequestConditionApproval.objects.filter(
+            leave_request_id=leave_request
+        ).update(is_approved=True)
+    spend_carry_first(leave_request, available_leave)
+    leave_request.status = "approved"
+    leave_request.save()
+    return None, True
 
 
 def can_target(user, employee):
@@ -741,31 +772,6 @@ class LeaveRequestApproveAPIView(APIView):
     def leave_approve_calculation(self, leave_request, available_leave):
         spend_carry_first(leave_request, available_leave)
 
-    def leave_multiple_approve(self, request, leave_request, available_leave):
-        if request.user.is_superuser:
-            LeaveRequestConditionApproval.objects.filter(
-                leave_request_id=leave_request
-            ).update(is_approved=True)
-            self.leave_approve_calculation(leave_request, available_leave)
-            leave_request.status = "approved"
-            leave_request.save()
-        else:
-            conditional_requests = leave_request.multiple_approvals()
-            approver = [
-                manager
-                for manager in conditional_requests["managers"]
-                if manager.employee_user_id == request.user
-            ]
-            condition_approval = LeaveRequestConditionApproval.objects.filter(
-                manager_id=approver[0], leave_request_id=leave_request
-            ).first()
-            condition_approval.is_approved = True
-            condition_approval.save()
-            if approver[0] == conditional_requests["managers"][-1]:
-                self.leave_approve_calculation(leave_request, available_leave)
-                leave_request.status = "approved"
-                leave_request.save()
-
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
@@ -775,12 +781,20 @@ class LeaveRequestApproveAPIView(APIView):
         serializer = LeaveRequestApproveSerializer(leave_request, data=request.data)
         if serializer.is_valid():
             available_leave = serializer.validated_data.get("available_leave")
+            final = True
             if not leave_request.multiple_approvals():
                 self.leave_approve_calculation(leave_request, available_leave)
                 leave_request.status = "approved"
                 leave_request.save()
             else:
-                self.leave_multiple_approve(request, leave_request, available_leave)
+                refusal, final = approve_chain_step(
+                    request.user, leave_request, available_leave
+                )
+                if refusal:
+                    return Response({"error": refusal}, status=403)
+            if not final:
+                # An earlier step of the chain: the employee hears at the end.
+                return Response(status=200)
             with contextlib.suppress(Exception):
                 notify.send(
                     request.user.employee_get,
@@ -828,6 +842,14 @@ class LeaveRequestRejectAPIView(APIView):
         # Refund the requester's balance (this used to be the approver's).
         employee_id = leave_request.employee_id
         if leave_request.status != "rejected":
+            if leave_request.multiple_approvals() and not request.user.is_superuser:
+                # Only an approver in the chain rejects a chained request.
+                step = chain_rejecter_step(request.user, leave_request)
+                if step is None:
+                    return Response({"error": CHAIN_REJECT_REFUSAL}, status=403)
+                step.is_approved = False
+                step.is_rejected = True
+                step.save()
             self.leave_calculation(leave_request, employee_id)
             with contextlib.suppress(Exception):
                 notify.send(
@@ -959,6 +981,14 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
                 available_leave.available_days + available_leave.carryforward_days
             )
             if total_available_leave >= leave_request.requested_days:
+                if leave_request.multiple_approvals():
+                    # Upstream approved chained requests outright here.
+                    refusal, _final = approve_chain_step(
+                        request.user, leave_request, available_leave
+                    )
+                    if refusal:
+                        skipped.append(leave_request.id)
+                    continue
                 self.leave_approve_calculation(leave_request, available_leave)
                 leave_request.status = "approved"
                 leave_request.save()

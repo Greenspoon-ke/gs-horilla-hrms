@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from django.apps import apps
 from django.db.models import Q
+from django.utils.translation import gettext as _
 
 from employee.models import Employee
 from horilla.methods import get_horilla_model_class
@@ -199,6 +200,111 @@ def can_act_on(user, instance, perm):
         return False
     conditions = multiple_approvals()
     return bool(conditions) and employee in conditions["managers"]
+
+
+def chain_step(user, leave_request):
+    """
+    The Multiple Approvals step `user` may approve now on `leave_request`.
+
+    Returns (step, is_last, refusal). With a refusal, the user may not approve
+    yet and nothing should change. Steps go in sequence order and the request
+    is final only once every step is approved. Upstream finalised whenever the
+    last person in an unordered list clicked, so approver 2 could approve alone,
+    and anyone outside the chain (HR, the reporting manager) hit a 500.
+    """
+    from leave.models import LeaveRequestConditionApproval
+
+    steps = list(
+        LeaveRequestConditionApproval.objects.filter(
+            leave_request_id=leave_request
+        ).order_by("sequence")
+    )
+    employee = getattr(user, "employee_get", None)
+    my_steps = [
+        s for s in steps if employee is not None and s.manager_id_id == employee.pk
+    ]
+    mine = next((s for s in my_steps if not s.is_approved), None)
+    if mine is None:
+        if my_steps:
+            return None, False, _("You have already approved this leave request.")
+        pending = ", ".join(str(s.manager_id) for s in steps if not s.is_approved)
+        return None, False, _("This leave request is waiting for: {}.").format(pending)
+    earlier = [s for s in steps if s.sequence < mine.sequence and not s.is_approved]
+    if earlier:
+        return (
+            None,
+            False,
+            _("{} has to approve this leave request first.").format(
+                earlier[0].manager_id
+            ),
+        )
+    is_last = all(s.is_approved for s in steps if s.pk != mine.pk)
+    return mine, is_last, None
+
+
+def hide_pending_chains(request, queryset):
+    """
+    Leave lists hide requests still going through a Multiple Approvals chain,
+    so a reporting manager outside the chain does not act on them; the
+    approver whose turn it is gets them back via filter_conditional_leave_request.
+    HR (leave.view_leaverequest) and department deputies keep seeing them, as
+    approving and rejecting are guarded by chain_step and chain_rejecter_step.
+    Only requested ones are hidden; upstream hid rejected and approved ones for
+    good because their other steps stay unmarked.
+    """
+    from gs_custom.deputies import deputy_department_ids
+    from leave.models import LeaveRequest, LeaveRequestConditionApproval
+
+    if request.user.has_perm("leave.view_leaverequest"):
+        return queryset
+    pending = LeaveRequestConditionApproval.objects.filter(
+        is_approved=False, is_rejected=False, leave_request_id__status="requested"
+    )
+    dept_ids = deputy_department_ids(request.user)
+    if dept_ids:
+        pending = pending.exclude(
+            leave_request_id__employee_id__employee_work_info__department_id__in=dept_ids
+        )
+    return (
+        LeaveRequest.objects.filter(id__in=queryset.values("id"))
+        .exclude(id__in=pending.values("leave_request_id"))
+        .distinct()
+    )
+
+
+def next_chain_approver(leave_request):
+    """The employee whose approval step is next, or None when all are done."""
+    from leave.models import LeaveRequestConditionApproval
+
+    step = (
+        LeaveRequestConditionApproval.objects.filter(
+            leave_request_id=leave_request, is_approved=False
+        )
+        .order_by("sequence")
+        .first()
+    )
+    return step.manager_id if step else None
+
+
+def chain_rejecter_step(user, leave_request):
+    """
+    The step a non-superuser rejects through on a request with a Multiple
+    Approvals chain: any approver in the chain may reject the whole request,
+    in any order. None means the user is not in the chain and may not reject
+    it (upstream raised IndexError, a 500, for HR and the reporting manager).
+    """
+    from leave.models import LeaveRequestConditionApproval
+
+    employee = getattr(user, "employee_get", None)
+    if employee is None:
+        return None
+    return (
+        LeaveRequestConditionApproval.objects.filter(
+            leave_request_id=leave_request, manager_id=employee
+        )
+        .order_by("sequence")
+        .first()
+    )
 
 
 def can_grant_directly(user, employee):
