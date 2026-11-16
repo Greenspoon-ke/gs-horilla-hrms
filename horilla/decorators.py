@@ -180,6 +180,10 @@ def manager_can_enter(function, perm):
             ).exists()
             if is_approval_manager:
                 return function(request, *args, **kwargs)
+        from gs_custom.deputies import deputy_department_ids, is_deputy_scope
+
+        if is_deputy_scope(perm) and deputy_department_ids(user):
+            return function(request, *args, **kwargs)
         is_manager = EmployeeWorkInformation.objects.filter(
             reporting_manager_id=employee
         ).exists()
