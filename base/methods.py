@@ -38,7 +38,7 @@ def users_count(self):
 Group.add_to_class("users_count", property(users_count))
 
 
-def filtersubordinates(request, queryset, perm=None, field="employee_id"):
+def _horilla_filtersubordinates(request, queryset, perm=None, field="employee_id"):
     """
     This method is used to filter out subordinates queryset element.
     """
@@ -112,7 +112,7 @@ def filter_own_and_subordinate_recordes(request, queryset, perm=None):
     return queryset
 
 
-def filtersubordinatesemployeemodel(request, queryset, perm=None):
+def _horilla_filtersubordinatesemployeemodel(request, queryset, perm=None):
     """
     This method is used to filter out all subordinates in the entire reporting chain.
     """
@@ -1027,3 +1027,36 @@ def generate_otp():
         str: A 6-digit random OTP as a string.
     """
     return str(random.randint(100000, 999999))
+
+
+def _deputy_extend(request, queryset, result, perm, lookup):
+    """Add employees in the user's deputy departments to `result` (leave views only)."""
+    from gs_custom.deputies import deputy_department_ids, is_deputy_scope
+
+    if not request or not is_deputy_scope(perm) or request.user.has_perm(perm):
+        return result
+    dept_ids = deputy_department_ids(request.user)
+    if not dept_ids:
+        return result
+    return queryset.filter(Q(pk__in=result.values("pk")) | Q(**{lookup: dept_ids}))
+
+
+def filtersubordinates(request, queryset, perm=None, field="employee_id"):
+    result = _horilla_filtersubordinates(request, queryset, perm, field)
+    # A falsy field still filters through employee_id in the original, so the
+    # deputy lookup follows the same path.
+    prefix = f"{field}__" if field else "employee_id__"
+    return _deputy_extend(
+        request,
+        queryset,
+        result,
+        perm,
+        f"{prefix}employee_work_info__department_id__in",
+    )
+
+
+def filtersubordinatesemployeemodel(request, queryset, perm=None):
+    result = _horilla_filtersubordinatesemployeemodel(request, queryset, perm)
+    return _deputy_extend(
+        request, queryset, result, perm, "employee_work_info__department_id__in"
+    )
