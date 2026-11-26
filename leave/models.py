@@ -527,11 +527,19 @@ class AvailableLeave(HorillaModel):
         return reset_date
 
     def leave_taken(self):
-        leave_taken = LeaveRequest.objects.filter(
+        requests = LeaveRequest.objects.filter(
             leave_type_id=self.leave_type_id,
             employee_id=self.employee_id,
             status="approved",
-        ).aggregate(total_sum=Sum("requested_days"))
+        )
+        # Rows on monthly accrual show this leave year's use only, next to a
+        # balance that is this year's too. The marker moves into January when
+        # December is credited and the year closes, so its year is the open one.
+        if self.last_accrual_date is not None:
+            requests = requests.filter(
+                start_date__gte=date(self.last_accrual_date.year, 1, 1)
+            )
+        leave_taken = requests.aggregate(total_sum=Sum("requested_days"))
 
         return leave_taken["total_sum"] if leave_taken["total_sum"] else 0
 

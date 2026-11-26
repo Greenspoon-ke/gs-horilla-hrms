@@ -490,3 +490,29 @@ class ResetJobTests(AccrualTestCase):
         AvailableLeave.objects.filter(pk=row.pk).update(expired_date=today)
         leave_reset()
         self.assertEqual(self.values(row), (20, 6, None))
+
+
+class LeaveTakenTests(AccrualTestCase):
+    """The used-days figure on the balance screens matches the balance's year."""
+
+    def setUp(self):
+        super().setUp()
+        self.person = self.employee("GSL001", date(2021, 10, 1))
+        # Leave across a year end counts in the year it starts, as in the rebuild.
+        self.approved(self.person, date(2025, 10, 13), 5)
+        self.approved(self.person, date(2025, 12, 24), 8)
+        self.approved(self.person, date(2026, 3, 6), 2)
+        self.approved(self.person, date(2026, 11, 3), 2)
+
+    def test_accrual_row_counts_this_leave_year_only(self):
+        row = self.balance(self.person, 10, 0, marker=date(2026, 11, 1))
+        self.assertEqual(row.leave_taken(), 4)
+
+    def test_year_close_starts_a_new_count(self):
+        # December credited: the marker is 1 January and 2026 is closed.
+        row = self.balance(self.person, 0, 10, marker=date(2027, 1, 1))
+        self.assertEqual(row.leave_taken(), 0)
+
+    def test_row_off_accrual_keeps_lifetime_total(self):
+        row = self.balance(self.person, 10, 0)
+        self.assertEqual(row.leave_taken(), 17)
